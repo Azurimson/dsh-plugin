@@ -25,15 +25,16 @@
     "forgetting-curve",
     "spaced-repetition"
   ],
-  "author": "",
+  "author": "Azurimson",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR-NAME/dsh-human-memory.git"
+    "url": "https://github.com/Azurimson/dsh-plugin.git",
+    "directory": "dsh-human-memory"
   },
-  "homepage": "https://github.com/YOUR-NAME/dsh-human-memory#readme",
+  "homepage": "https://github.com/Azurimson/dsh-plugin/tree/main/dsh-human-memory#readme",
   "bugs": {
-    "url": "https://github.com/YOUR-NAME/dsh-human-memory/issues"
+    "url": "https://github.com/Azurimson/dsh-plugin/issues"
   },
   "dsh": {
     "bundle": {
