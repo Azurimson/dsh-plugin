@@ -166,6 +166,14 @@ export class MemoryEngine {
     return { ...record, accessCount: record.accessCount + 1, lastAccessedAt: now }
   }
 
+  /**
+   * 软删除：标记 `deletedAt`。记录会立即从界面与召回中消失，
+   * 但数据保留到下一次巩固时才真正删除（删除缓冲区）。
+   */
+  markDeleted(record, now = Date.now()) {
+    return { ...record, deletedAt: now }
+  }
+
   // ------------------------------------------------------------------
   // 4. 检索（综合相关度 + 强度 + 重要性排序）
   // ------------------------------------------------------------------
@@ -173,7 +181,7 @@ export class MemoryEngine {
   recall(records, query, limit = 10, now = Date.now()) {
     const w = this.retWeights
     return records
-      .filter((r) => !r.archived)
+      .filter((r) => !r.archived && !r.deletedAt && r.kind !== 'turn')
       .map((r) => {
         const relevance = similarity(query, r.content)
         const s = this.strength(r, now)
@@ -187,22 +195,64 @@ export class MemoryEngine {
           relevance,
           importance: r.importance,
           occurredAt: r.occurredAt ?? r.createdAt,
+          sessionId: r.sessionId ?? '',
         }
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
   }
 
+  /**
+   * 行为时间线：按天 / 会话检索「每轮做了什么」，按时间正序返回。
+   * @param records 全部记忆
+   * @param opts.date 可选，YYYY-MM-DD；不传则不限日期
+   * @param opts.sessionId 可选，只看某个会话
+   * @param limit 最多返回条数
+   */
+  timeline(records, opts = {}, limit = 200) {
+    const { date, sessionId } = opts
+    const dayStart = date ? parseTime(date) : null
+    const dayEnd = dayStart != null ? dayStart + 86_400_000 : null
+    return records
+      .filter((r) => r.kind === 'turn')
+      .filter((r) => !sessionId || r.sessionId === sessionId)
+      .filter((r) => {
+        if (dayStart == null) return true
+        const t = r.occurredAt ?? r.createdAt ?? 0
+        return t >= dayStart && t < dayEnd
+      })
+      .sort((a, b) => (a.occurredAt ?? a.createdAt ?? 0) - (b.occurredAt ?? b.createdAt ?? 0))
+      .slice(0, limit)
+  }
+
+  /**
+   * 清理工作记忆：默认不设条数上限（capacity = 0），只按 minRetentionMs 回收。
+   * 年龄以「最后一次访问时间」为准——被召回会刷新 lastAccessedAt，从而延后清理。
+   * 返回 { removed: string[], result: MemoryRecord[] }。
+   */
+  pruneWorking(records, { capacity = 0, minRetentionMs, ttlMs = 86_400_000 } = {}, now = Date.now()) {
+    const minAge = minRetentionMs ?? ttlMs
+    const working = records.filter((r) => r.layer === 'working' && !r.deletedAt)
+    if (!working.length) return { removed: [], result: records }
+    const touched = (r) => r.lastAccessedAt ?? r.occurredAt ?? r.createdAt ?? 0
+    const byTime = working.slice().sort((a, b) => touched(b) - touched(a))
+    const capped = capacity > 0 ? byTime.slice(0, capacity) : byTime
+    const keep = new Set(capped.filter((r) => now - touched(r) <= minAge).map((r) => r.id))
+    const removed = working.filter((r) => !keep.has(r.id)).map((r) => r.id)
+    if (!removed.length) return { removed: [], result: records }
+    return { removed, result: records.filter((r) => r.layer !== 'working' || keep.has(r.id)) }
+  }
+
   // ------------------------------------------------------------------
   // 5. 巩固（只扫高价值情节记忆，合并成语义记忆）
   // ------------------------------------------------------------------
 
-  /** 巩固：只扫高价值情节记忆，相似的一组合并成语义记忆并归档源记忆。 */
+  /** 巩固：扫描高价值情节/工作记忆，相似的一组合并成语义记忆并归档源记忆。 */
   consolidate(records, now = Date.now()) {
     const cfg = this.settings.consolidation
     const highValue = records.filter((r) => {
-      if (r.layer !== 'episodic') return false
-      if (r.archived) return false
+      if (r.layer !== 'episodic' && r.layer !== 'working') return false
+      if (r.archived || r.deletedAt) return false
       return this.strength(r, now) >= cfg.strengthThreshold || r.accessCount >= cfg.minAccessCount
     })
 
@@ -261,7 +311,13 @@ export class MemoryEngine {
   dueForReview(records, now = Date.now()) {
     const cfg = this.settings.review
     return records
-      .filter((r) => !r.archived && this.strength(r, now) < cfg.dueThreshold)
+      .filter((r) => {
+        if (r.archived || r.deletedAt) return false
+        // 相对阈值：保留率低于 dueThreshold 才算「临期遗忘」。
+        // 这样低权重的工作记忆不会一上来就刷屏，而是按各自的衰减速度到期。
+        const base = r.importance ?? 0
+        return this.strength(r, now) < base * cfg.dueThreshold
+      })
       .sort((a, b) => this.strength(a, now) - this.strength(b, now))
       .slice(0, cfg.maxPerBatch)
   }
@@ -276,6 +332,9 @@ export class MemoryEngine {
     factors.dwell = clamp01(this.dwellFactor(dwellMs))
     // occurredAt = 事件真正发生的时间；缺省用写入时间
     const occurredAt = parseTime(input.occurredAt) ?? now
+    const kind = input.kind ?? 'fact'
+    // importance 可显式覆盖（工作记忆刻意用很低的值）
+    const importance = input.importance != null ? clamp01(input.importance) : this.computeImportance(factors)
 
     if (existing) {
       const reinforced = this.reinforce(existing, now)
@@ -286,24 +345,29 @@ export class MemoryEngine {
         dwellMs: existing.dwellMs + dwellMs,
         // 保留最早的「发生时间」，不因再次提起而覆盖
         occurredAt: existing.occurredAt ?? occurredAt,
+        kind: existing.kind ?? kind,
       }
     }
 
     const baseId = hashCode(input.content)
-    return {
-      id: `mem-${baseId}`,
+    const record = {
+      id: input.id ?? `mem-${baseId}`,
       content: input.content,
       layer: input.layer ?? 'episodic',
+      kind,
       createdAt: now,
       occurredAt,
       lastAccessedAt: now,
       accessCount: 0,
       mentionCount: 0,
       reviewHistory: [now],
-      importance: this.computeImportance(factors),
+      importance,
       factors,
       dwellMs,
       archived: false,
     }
+    if (input.sessionId) record.sessionId = input.sessionId
+    if (input.turn != null) record.turn = input.turn
+    return record
   }
 }

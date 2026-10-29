@@ -1,26 +1,56 @@
 {
   "name": "dsh-human-memory",
-  "version": "0.1.1",
-  "description": "给 DSH 赋予人类式记忆（遗忘曲线 / 间隔重复 / 巩固）的本地插件",
+  "version": "0.1.2",
+  "description": "给 DSH 赋予人类式记忆：遗忘曲线、间隔重复、巩固、行为时间线与工作记忆。",
   "type": "module",
   "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./client/client.js"
+  },
   "files": [
     "src",
+    "client",
     "cordis.patch.yml",
     "settings.json",
-    "README.md"
+    "dsh.plugin.json",
+    "README.md",
+    "LICENSE"
   ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "forgetting-curve",
+    "spaced-repetition"
+  ],
+  "author": "Azurimson",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Azurimson/dsh-plugin.git",
+    "directory": "dsh-human-memory"
+  },
+  "homepage": "https://github.com/Azurimson/dsh-plugin/tree/main/dsh-human-memory#readme",
+  "bugs": {
+    "url": "https://github.com/Azurimson/dsh-plugin/issues"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
     }
   },
   "scripts": {
-    "test": "node test/self-test.mjs && node test/library-test.mjs"
+    "test": "node test/self-test.mjs && node test/library-test.mjs && node test/consolidate-test.mjs && node test/gui-test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-tools": "*"
-  },
-  "license": "MIT"
+  }
 }

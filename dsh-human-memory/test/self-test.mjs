@@ -143,5 +143,95 @@ check('recall 结果带 occurredAt', () => {
   assert.strictEqual(hits[0].occurredAt, t)
 })
 
+// ---------- 工作记忆 ----------
+function wrec(id, t) {
+  return {
+    id, content: id, layer: 'working', kind: 'tool',
+    createdAt: t, occurredAt: t, lastAccessedAt: t,
+    accessCount: 0, mentionCount: 0, reviewHistory: [],
+    importance: 0.05, factors: {}, dwellMs: 0, archived: false,
+  }
+}
+
+check('write 支持显式指定 importance（工作记忆低权重）', () => {
+  const rec = engine.write({ content: '工作记忆测试', layer: 'working', importance: 0.05 })
+  assert.strictEqual(rec.importance, 0.05)
+})
+
+check('pruneWorking 只保留最近 N 条', () => {
+  const now = Date.now()
+  const records = [wrec('w1', now - 3000), wrec('w2', now - 2000), wrec('w3', now - 1000), { ...wrec('e1', now), layer: 'episodic' }]
+  const res = engine.pruneWorking(records, { capacity: 2, ttlMs: 60000 }, now)
+  assert.deepStrictEqual(res.removed.sort(), ['w1'])
+  assert.strictEqual(res.result.filter((r) => r.layer === 'working').length, 2)
+})
+
+check('pruneWorking 清理超过 TTL 的记录', () => {
+  const now = Date.now()
+  const records = [wrec('old', now - 100000), wrec('new', now), { ...wrec('e1', now), layer: 'episodic' }]
+  const res = engine.pruneWorking(records, { capacity: 10, ttlMs: 50000 }, now)
+  assert.deepStrictEqual(res.removed, ['old'])
+})
+
+check('pruneWorking：capacity=0 表示不设上限', () => {
+  const now = Date.now()
+  const records = [wrec('x1', now - 2000), wrec('x2', now - 1000), wrec('x3', now)]
+  const res = engine.pruneWorking(records, { capacity: 0, ttlMs: 60000 }, now)
+  assert.strictEqual(res.removed.length, 0)
+  assert.strictEqual(res.result.filter((r) => r.layer === 'working').length, 3)
+})
+
+check('工作记忆参与事实召回', () => {
+  const w = engine.write({ content: '工作记忆：运行命令 npm test', layer: 'working', importance: 0.05 })
+  const hits = engine.recall([w], '运行命令', 5)
+  assert.strictEqual(hits.length, 1)
+})
+
+check('工作记忆参与复习（按相对保留率到期）', () => {
+  const now = Date.now()
+  const fresh = { ...wrec('w-fresh', now), importance: 0.05 }
+  const old = { ...wrec('w-old', now - 3 * 86_400_000), importance: 0.05 }
+  const due = engine.dueForReview([fresh, old], now)
+  assert(due.some((r) => r.id === 'w-old'), '老的应到期')
+  assert(!due.some((r) => r.id === 'w-fresh'), '刚写入的不应到期')
+})
+
+check('工作记忆参与巩固（高访问次数）', () => {
+  const now = Date.now()
+  const a = { ...wrec('wa', now), content: '写文件：a.txt 配置', accessCount: 3 }
+  const b = { ...wrec('wb', now), content: '写文件：a.txt 配置项', accessCount: 3 }
+  const res = engine.consolidate([a, b], now)
+  assert(res.created >= 1, '工作记忆应可参与巩固')
+})
+
+check('工作记忆被召回后延后清理（lastAccessedAt 刷新）', () => {
+  const now = Date.now()
+  const old = wrec('revived', now - 100000)
+  const revived = { ...old, lastAccessedAt: now - 1000 }
+  const res = engine.pruneWorking([revived], { capacity: 0, ttlMs: 50000 }, now)
+  assert.strictEqual(res.removed.length, 0)
+})
+
+check('recall 结果带 sessionId', () => {
+  const rec = engine.write({ content: '会话来源测试', sessionId: 's-1' })
+  const hits = engine.recall([rec], '会话来源', 5)
+  assert.strictEqual(hits[0].sessionId, 's-1')
+})
+
+check('软删除后不参与召回', () => {
+  const rec = engine.write({ content: '软删除测试' })
+  const deleted = engine.markDeleted(rec)
+  const hits = engine.recall([deleted], '软删除', 5)
+  assert.strictEqual(hits.length, 0)
+})
+
+check('软删除后不参与复习与巩固', () => {
+  const now = Date.now()
+  const a = { ...wrec('da', now), deletedAt: now, accessCount: 3, content: '写文件：x 配置' }
+  const b = { ...wrec('db', now), deletedAt: now, accessCount: 3, content: '写文件：x 配置项' }
+  assert.strictEqual(engine.consolidate([a, b], now).created, 0)
+  assert.strictEqual(engine.dueForReview([a], now).length, 0)
+})
+
 console.log(`\n结果：${passed} 通过，${failed} 失败`)
 process.exit(failed ? 1 : 0)

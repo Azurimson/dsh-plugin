@@ -93,6 +93,44 @@ lib2.remove('mem-new')
 lib2.dispose()
 check('删除后文件被移除', () => assert(!existsSync(join(root, 'memories', 'episodic', 'mem-new.json'))))
 
+// 删除缓冲区：移入 / 恢复 / 真正删除
+const trashRec = {
+  id: 'mem-trash',
+  content: '待删除的记忆',
+  layer: 'episodic',
+  createdAt: 1_700_000_200_000,
+  occurredAt: 1_700_000_200_000,
+  lastAccessedAt: 1_700_000_200_000,
+  accessCount: 0,
+  mentionCount: 0,
+  reviewHistory: [1_700_000_200_000],
+  importance: 0.3,
+  factors: {},
+  dwellMs: 0,
+  archived: false,
+}
+const lib3 = new MemoryLibrary(root, 'memories.json', false, 999_999)
+lib3.upsert(trashRec)
+
+check('移入删除缓冲区成功', () => assert.strictEqual(lib3.moveToTrash('mem-trash'), true))
+check('文件已移入 trash/ 文件夹', () => assert(existsSync(join(root, 'trash', 'mem-trash.json'))))
+check('当前记忆区不再包含它', () => assert(!lib3.all().some((m) => m.id === 'mem-trash')))
+check('listTrash 能列出', () => assert(lib3.listTrash().some((m) => m.id === 'mem-trash')))
+
+check('restoreFromTrash 能恢复', () => {
+  assert.strictEqual(lib3.restoreFromTrash('mem-trash'), true)
+  assert(lib3.all().some((m) => m.id === 'mem-trash'))
+  assert(!existsSync(join(root, 'trash', 'mem-trash.json')))
+})
+
+lib3.moveToTrash('mem-trash')
+const purged = lib3.purgeTrash()
+lib3.dispose()
+check('purgeTrash 清空缓冲区', () => {
+  assert(purged >= 1)
+  assert(!existsSync(join(root, 'trash', 'mem-trash.json')))
+})
+
 console.log(`\n结果：${passed} 通过，${failed} 失败`)
 rmSync(home, { recursive: true, force: true })
 process.exit(failed ? 1 : 0)

@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: 核心逻辑自测
+        run: node test/self-test.mjs
+      - name: 记忆库与迁移自测
+        run: node test/library-test.mjs
+      - name: 巩固实测
+        run: node test/consolidate-test.mjs
+      - name: 记忆接口服务实测
+        run: node test/gui-test.mjs

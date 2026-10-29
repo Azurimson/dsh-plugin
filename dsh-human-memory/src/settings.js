@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS = {
   storage: {
     dataDir: '',
     fileName: 'memories.json',
+    trashDir: 'trash',
     syncWrite: false,
     flushIntervalMs: 5000,
   },
@@ -19,6 +20,10 @@ export const DEFAULT_SETTINGS = {
     minChars: 8,
     maxPerTurn: 3,
     includeAssistant: false,
+    turnLog: true,
+  },
+  gui: {
+    enabled: true,
   },
   forgetting: {
     tauMs: 86_400_000,
@@ -48,6 +53,7 @@ export const DEFAULT_SETTINGS = {
   },
   consolidation: {
     autoOnTurnEnd: true,
+    intervalMs: 86_400_000,
     strengthThreshold: 0.6,
     minAccessCount: 2,
     mergeSimilarity: 0.5,
@@ -60,7 +66,10 @@ export const DEFAULT_SETTINGS = {
     maxPerBatch: 5,
   },
   workingMemory: {
-    capacity: 7,
+    enabled: true,
+    capacity: 0,
+    minRetentionMs: 86_400_000,
+    importance: 0.05,
   },
 }
 

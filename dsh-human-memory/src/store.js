@@ -27,20 +27,23 @@ export function resolveDataDir(dataDir) {
   return join(homedir(), '.dsh', 'human-memory')
 }
 
-const LAYERS = ['episodic', 'semantic', 'core']
+const LAYERS = ['working', 'episodic', 'semantic', 'core']
 
 export class MemoryLibrary {
-  constructor(dataDir, fileName, syncWrite, flushIntervalMs) {
+  constructor(dataDir, fileName, syncWrite, flushIntervalMs, trashDirName) {
     this.rootDir = resolveDataDir(dataDir)
     this.legacyName = fileName || 'memories.json'
     this.memoriesDir = join(this.rootDir, 'memories')
+    this.trashDir = join(this.rootDir, trashDirName || 'trash')
     this.indexPath = join(this.rootDir, 'index.json')
+    this.statePath = join(this.rootDir, 'state.json')
     this.syncWrite = syncWrite
     this.memories = []
     this.persisted = new Map() // id -> 上次写入的文件路径
     this.dirty = new Set()
     this.removed = new Set()
     this.flushTimer = null
+    this._state = { lastConsolidationAt: 0 }
 
     this.load()
     if (!syncWrite) {
@@ -60,6 +63,41 @@ export class MemoryLibrary {
       this.migrateLegacy(legacy)
     }
     this.loadRecords()
+    this.loadState()
+    this.migrateDeleted()
+  }
+
+  /** 兼容旧版：把仍带 deletedAt 标记的记录移入删除缓冲区。 */
+  migrateDeleted() {
+    const ids = this.memories.filter((r) => r.deletedAt).map((r) => r.id)
+    for (const id of ids) this.moveToTrash(id)
+  }
+
+  /** 读取调度状态（上次巩固时间等），不存在则用默认值。 */
+  loadState() {
+    try {
+      if (!existsSync(this.statePath)) return
+      const parsed = JSON.parse(readFileSync(this.statePath, 'utf8'))
+      if (parsed && typeof parsed === 'object') this._state = { ...this._state, ...parsed }
+    } catch (err) {
+      console.warn('[dsh-human-memory] 状态文件读取失败，将使用默认值：', err)
+    }
+  }
+
+  state() {
+    return { ...this._state }
+  }
+
+  /** 合并并持久化调度状态（原子写）。 */
+  patchState(patch) {
+    this._state = { ...this._state, ...(patch || {}) }
+    try {
+      mkdirSync(this.rootDir, { recursive: true })
+      this.writeAtomic(this.statePath, JSON.stringify(this._state, null, 2))
+    } catch (err) {
+      console.warn('[dsh-human-memory] 状态文件写入失败：', err)
+    }
+    return this.state()
   }
 
   /** 把旧版单文件 memories.json 拆分到新的 memories/ 目录，并备份原文件。 */
@@ -141,6 +179,91 @@ export class MemoryLibrary {
     this.removed.add(id)
     if (this.syncWrite) this.flush()
     return true
+  }
+
+  /**
+   * 把一条记忆移入删除缓冲区（`<root>/<trashDir>/<id>.json`）。
+   * 移入后立即从当前记忆区移除，但文件保留，方便备份/恢复；
+   * 真正删除发生在下一次巩固（purgeTrash）。
+   */
+  moveToTrash(id) {
+    const idx = this.memories.findIndex((m) => m.id === id)
+    if (idx < 0) return false
+    const rec = this.memories[idx]
+    try {
+      mkdirSync(this.trashDir, { recursive: true })
+      const target = join(this.trashDir, `${rec.id}.json`)
+      this.writeAtomic(target, JSON.stringify({ ...rec, deletedAt: Date.now() }, null, 2))
+    } catch (err) {
+      console.warn('[dsh-human-memory] 移入删除缓冲区失败：', err)
+      return false
+    }
+    this.remove(id)
+    return true
+  }
+
+  /** 真正删除删除缓冲区里的所有文件，返回删除数量。 */
+  purgeTrash() {
+    if (!existsSync(this.trashDir)) return 0
+    let files = []
+    try {
+      files = readdirSync(this.trashDir)
+    } catch {
+      return 0
+    }
+    let count = 0
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue
+      try {
+        unlinkSync(join(this.trashDir, f))
+        count++
+      } catch {
+        /* 单个失败不影响其它 */
+      }
+    }
+    return count
+  }
+
+  /** 列出删除缓冲区里的记录（供备份/恢复查看）。 */
+  listTrash() {
+    if (!existsSync(this.trashDir)) return []
+    const out = []
+    let files = []
+    try {
+      files = readdirSync(this.trashDir)
+    } catch {
+      return out
+    }
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue
+      try {
+        out.push(JSON.parse(readFileSync(join(this.trashDir, f), 'utf8')))
+      } catch {
+        /* 跳过损坏文件 */
+      }
+    }
+    return out
+  }
+
+  /** 从删除缓冲区恢复一条记忆。 */
+  restoreFromTrash(id) {
+    const p = join(this.trashDir, `${id}.json`)
+    if (!existsSync(p)) return false
+    try {
+      const rec = JSON.parse(readFileSync(p, 'utf8'))
+      delete rec.deletedAt
+      const idx = this.memories.findIndex((m) => m.id === rec.id)
+      if (idx >= 0) this.memories[idx] = rec
+      else this.memories.push(rec)
+      this.dirty.add(rec.id)
+      this.removed.delete(rec.id)
+      unlinkSync(p)
+      if (this.syncWrite) this.flush()
+      return true
+    } catch (err) {
+      console.warn('[dsh-human-memory] 从删除缓冲区恢复失败：', err)
+      return false
+    }
   }
 
   /** 批量替换（巩固后整组写回）。 */
