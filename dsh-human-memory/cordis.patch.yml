@@ -1,0 +1,5 @@
+# 把本插件的一行挂进 profile 配置层。
+# 加载顺序：profile bundles → 本 profile 的 cordis.patch.yml → $DSH_HOME/cordis.patch.yml → --patch overlay
+- insert:
+    - id: human-memory
+      name: dsh-human-memory

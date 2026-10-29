@@ -1,0 +1,26 @@
+{
+  "name": "dsh-human-memory",
+  "version": "0.1.0",
+  "description": "给 DSH 赋予人类式记忆（遗忘曲线 / 间隔重复 / 巩固）的本地插件",
+  "type": "module",
+  "main": "src/index.js",
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "settings.json",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node test/self-test.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "license": "MIT"
+}
