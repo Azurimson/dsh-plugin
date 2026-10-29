@@ -1,0 +1,94 @@
+{
+  "format": 1,
+  "title": {
+    "en": "dsh-plugin",
+    "zh": "dsh-plugin 插件合集"
+  },
+  "description": {
+    "en": "DeepSeek Harness plugins by Azurimson, one subdirectory per plugin.",
+    "zh": "Azurimson 的 DeepSeek Harness 插件合集，每个插件一个子目录。"
+  },
+  "metadata": {
+    "categories": {
+      "memory": {
+        "title": {
+          "en": "Memory",
+          "zh": "记忆"
+        }
+      }
+    },
+    "labels": {
+      "local-first": {
+        "title": {
+          "en": "Local only",
+          "zh": "纯本地"
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "dsh-human-memory",
+      "title": {
+        "en": "DSH Human Memory",
+        "zh": "人类式记忆"
+      },
+      "description": {
+        "en": "Human-like memory for DSH: forgetting curve, spaced repetition, consolidation, per-turn auto capture, working memory, and a settings-panel GUI.",
+        "zh": "给 DSH 一套人类式记忆：遗忘曲线、间隔重复、巩固、每轮自动自查、工作记忆，附设置区卡片 GUI。"
+      },
+      "author": "Azurimson",
+      "homepage": "https://github.com/Azurimson/dsh-plugin/tree/main/dsh-human-memory",
+      "repository": {
+        "url": "https://github.com/Azurimson/dsh-plugin",
+        "directory": "dsh-human-memory"
+      },
+      "metadata": {
+        "category": "memory",
+        "keywords": [
+          "memory",
+          "forgetting-curve",
+          "spaced-repetition",
+          "consolidation",
+          "working-memory",
+          "dsh-plugin"
+        ],
+        "labels": [
+          "local-first"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.1.0",
+          "publishTimestamp": 1793250977,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/Azurimson/dsh-plugin",
+            "commit": "1cc58878b1f1651d8177a2b3002d83164b8218a0",
+            "path": "dsh-human-memory"
+          }
+        },
+        {
+          "version": "0.1.1",
+          "publishTimestamp": 1793252251,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/Azurimson/dsh-plugin",
+            "commit": "36576c40f2b3139c303248dae0bca8cd9c60e46f",
+            "path": "dsh-human-memory"
+          }
+        },
+        {
+          "version": "0.1.2",
+          "publishTimestamp": 1793277795,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/Azurimson/dsh-plugin",
+            "commit": "986fae32e6691d27d404c8633d3c1e0d2ceabe91",
+            "path": "dsh-human-memory"
+          }
+        }
+      ]
+    }
+  ]
+}
