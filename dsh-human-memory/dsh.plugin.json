@@ -8,6 +8,6 @@
   "platforms": ["web"],
   "entry": "src/index.js",
   "client": "client/client.js",
-  "homepage": "https://github.com/Azurimson/dsh-plugin/tree/main/dsh-human-memory",
-  "repository": "https://github.com/Azurimson/dsh-plugin"
+  "homepage": "",
+  "repository": ""
 }

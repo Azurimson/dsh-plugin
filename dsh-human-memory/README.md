@@ -48,7 +48,8 @@ dsh-human-memory/
 ├── 测试文档.md
 ├── 更新文档.md
 ├── 迭代方向-用户画像记忆.md
-└── 迭代方向-会话短期记忆.md
+├── 迭代方向-会话短期记忆.md
+└── deepseek-conversation.txt # 需求来源（原始对话）
 ```
 
 运行时的记忆库结构（`~/.dsh/human-memory/`）：
