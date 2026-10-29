@@ -38,6 +38,26 @@ function similarity(a, b) {
   return inter / Math.sqrt(ta.size * tb.size)
 }
 
+/** 把 epoch 毫秒格式化为本地「YYYY-MM-DD HH:mm」，用于回答「这件事是什么时候发生的」。 */
+export function formatDate(ts) {
+  if (!Number.isFinite(ts)) return '未知时间'
+  const d = new Date(ts)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** 解析时间：接受 epoch 毫秒、纯日期（YYYY-MM-DD）、或 ISO 字符串；失败返回 null。 */
+export function parseTime(value) {
+  if (value == null || value === '') return null
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const s = String(value).trim()
+  if (/^\d+$/.test(s)) return Number(s)
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
+  const t = Date.parse(s)
+  return Number.isFinite(t) ? t : null
+}
+
 export class MemoryEngine {
   constructor(settings) {
     this.settings = settings
@@ -158,7 +178,16 @@ export class MemoryEngine {
         const relevance = similarity(query, r.content)
         const s = this.strength(r, now)
         const score = w.relevance * relevance + w.strength * s + w.importance * r.importance
-        return { id: r.id, content: r.content, layer: r.layer, score, strength: s, relevance, importance: r.importance }
+        return {
+          id: r.id,
+          content: r.content,
+          layer: r.layer,
+          score,
+          strength: s,
+          relevance,
+          importance: r.importance,
+          occurredAt: r.occurredAt ?? r.createdAt,
+        }
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
@@ -203,6 +232,7 @@ export class MemoryEngine {
         content: summary,
         layer: 'semantic',
         createdAt: now,
+        occurredAt: Math.min(...group.map((r) => r.occurredAt ?? r.createdAt ?? now)),
         lastAccessedAt: now,
         accessCount: 0,
         mentionCount: 0,
@@ -244,10 +274,19 @@ export class MemoryEngine {
     const factors = { ...this.estimateFactors(input.content), ...(input.factors ?? {}) }
     const dwellMs = input.dwellMs ?? 0
     factors.dwell = clamp01(this.dwellFactor(dwellMs))
+    // occurredAt = 事件真正发生的时间；缺省用写入时间
+    const occurredAt = parseTime(input.occurredAt) ?? now
 
     if (existing) {
       const reinforced = this.reinforce(existing, now)
-      return { ...reinforced, content: input.content, factors, dwellMs: existing.dwellMs + dwellMs }
+      return {
+        ...reinforced,
+        content: input.content,
+        factors,
+        dwellMs: existing.dwellMs + dwellMs,
+        // 保留最早的「发生时间」，不因再次提起而覆盖
+        occurredAt: existing.occurredAt ?? occurredAt,
+      }
     }
 
     const baseId = hashCode(input.content)
@@ -256,6 +295,7 @@ export class MemoryEngine {
       content: input.content,
       layer: input.layer ?? 'episodic',
       createdAt: now,
+      occurredAt,
       lastAccessedAt: now,
       accessCount: 0,
       mentionCount: 0,

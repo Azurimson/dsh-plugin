@@ -2,7 +2,7 @@
 // 直接测 src/memory.js 的纯逻辑（不依赖 DSH），用来确认核心机制正确。
 // 运行：node test/self-test.mjs
 import assert from 'node:assert'
-import { MemoryEngine } from '../src/memory.js'
+import { MemoryEngine, formatDate, parseTime } from '../src/memory.js'
 import { loadSettings, stripJsonComments } from '../src/settings.js'
 
 let passed = 0
@@ -107,6 +107,40 @@ check('年久未用的记忆会进入待复习列表', () => {
   weak.lastAccessedAt = Date.now() - 365 * 86_400_000 // 一年前
   const due = engine.dueForReview([weak], Date.now())
   assert(due.some((m) => m.id === weak.id), '应判定为需要复习')
+})
+
+// ---------- 事件日期 ----------
+check('写入时记录事件发生时间 occurredAt', () => {
+  const t = new Date(2026, 0, 15, 9, 30).getTime()
+  const rec = engine.write({ content: '发生于某天的事件', occurredAt: t })
+  assert.strictEqual(rec.occurredAt, t)
+})
+
+check('重复写入保留最早的发生时间', () => {
+  const t1 = new Date(2026, 0, 15).getTime()
+  const t2 = new Date(2026, 1, 20).getTime()
+  const first = engine.write({ content: '同一事件被再次提起', occurredAt: t1 })
+  const again = engine.write({ content: '同一事件被再次提起', occurredAt: t2 }, first)
+  assert.strictEqual(again.occurredAt, t1)
+})
+
+check('formatDate 输出可读日期', () => {
+  const t = new Date(2026, 0, 15, 9, 5).getTime()
+  assert.strictEqual(formatDate(t), '2026-01-15 09:05')
+})
+
+check('parseTime 支持 ISO / 纯日期 / epoch', () => {
+  assert.strictEqual(parseTime('2026-01-15'), new Date(2026, 0, 15).getTime())
+  assert.strictEqual(parseTime(1_700_000_000_000), 1_700_000_000_000)
+  assert(parseTime('2026-01-15T09:30:00+08:00') > 0)
+  assert.strictEqual(parseTime('不是时间'), null)
+})
+
+check('recall 结果带 occurredAt', () => {
+  const t = new Date(2026, 2, 1).getTime()
+  const rec = engine.write({ content: '带日期的记忆', occurredAt: t })
+  const hits = engine.recall([rec], '带日期')
+  assert.strictEqual(hits[0].occurredAt, t)
 })
 
 console.log(`\n结果：${passed} 通过，${failed} 失败`)

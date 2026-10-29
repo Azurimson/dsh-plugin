@@ -14,6 +14,12 @@ export const DEFAULT_SETTINGS = {
     syncWrite: false,
     flushIntervalMs: 5000,
   },
+  autoCapture: {
+    enabled: true,
+    minChars: 8,
+    maxPerTurn: 3,
+    includeAssistant: false,
+  },
   forgetting: {
     tauMs: 86_400_000,
     c: 0.3,

@@ -5,16 +5,28 @@
   //  所有「权重」字段取值范围见注释；改错导致加载失败时会回退默认值。
   // ==============================================================
 
-  // ---------- 本地存储 ----------
+  // ---------- 本地存储（记忆库） ----------
   "storage": {
-    // 记忆数据所在目录。留空则使用 $DSH_HOME/human-memory（没有 $DSH_HOME 时退到 ~/.dsh/human-memory）
+    // 记忆库根目录。留空则使用 $DSH_HOME/human-memory（没有 $DSH_HOME 时退到 ~/.dsh/human-memory）
     "dataDir": "",
-    // 记忆数据文件名
+    // 旧版单文件记忆库的文件名（仅用于迁移：存在时会自动拆分到 memories/ 目录并备份为 .bak）
     "fileName": "memories.json",
     // 每次写入后是否立即落盘（false 则按 flushIntervalMs 定时落盘，性能更好）
     "syncWrite": false,
     // 定时落盘间隔（毫秒）
     "flushIntervalMs": 5000
+  },
+
+  // ---------- 自动自查（每轮对话后自动提取值得记住的信息） ----------
+  "autoCapture": {
+    // 是否在每轮对话结束后自动自查并写入
+    "enabled": true,
+    // 内容短于该字符数不自动写入
+    "minChars": 8,
+    // 每轮最多自动写入几条
+    "maxPerTurn": 3,
+    // 是否也把 assistant 的回复纳入自查（通常只记用户信息即可）
+    "includeAssistant": false
   },
 
   // ---------- 遗忘曲线（时间衰减）参数 ----------

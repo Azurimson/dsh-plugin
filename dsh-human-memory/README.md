@@ -1,6 +1,6 @@
 # dsh-human-memory
 
-> 当前版本：**v0.1.0** · [更新日志](./CHANGELOG.md) · [发布记录](https://github.com/Azurimson/dsh-plugin/releases)
+> 版本 **0.1.1** ｜ 变化记录与测试方法见 [更新文档.md](./更新文档.md)
 
 给 DeepSeek Harness（DSH）赋予一套受认知科学启发的「人类式记忆」本地插件。
 
@@ -9,57 +9,49 @@
 - **间隔重复 + 间隔效应**：同一事件间隔越久再次被提起，加深越多。
 - **巩固**（睡眠巩固的类比）：把高价值情节记忆合并提炼成语义记忆。
 - **主动复习**：找出临近遗忘的记忆。
+- **每轮自动自查**：每轮对话结束后自动判断哪些信息值得记住并写入。
+- **事件日期**：每条记忆记录「事件发生时间」，可回答「这件事是什么时候发生的」。
 
-记忆**全部存在本地**（单个 JSON 文件），不联网、不依赖任何云端数据库。
+记忆**全部存在本地**（目录式记忆库，每条记忆独立成文件），不联网、不依赖任何云端数据库。
 
 > 本项目是抛砖引玉之作，架构与参数都还粗糙，期待大佬们来迭代。已开源，欢迎提交 bug 反馈与改进建议。
-
-## 版本
-
-当前版本 **v0.1.0**，变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
-
-### v0.1.0 的记忆是怎么产生的
-
-当前版本**没有自动抓取对话的机制**，记忆只在模型调用 `memory_write` 时产生：
-
-- 你说「记住：…」是最强的触发信号，模型几乎一定会写。
-- 即使不说，模型看到工具描述里写着「重要信息应主动调用」，可能会自己判断写入——但**不保证、不可控**。
-
-也就是说，本插件提供的是「记忆的存储、衰减与检索模型」，并不负责自动记录每一次对话；「记住什么」的主动权在模型手上。
 
 ## 目录结构
 
 ```
 dsh-human-memory/
 ├── package.json          # dsh.bundle manifest + 依赖
-├── CHANGELOG.md          # 更新日志
 ├── cordis.patch.yml      # 插件挂载行
 ├── settings.json         # 所有权重与参数（中文注释，可直接改）
 ├── src/
-│   ├── index.js          # 插件入口：注册工具 / 命令 / 事件
-│   ├── memory.js         # 记忆引擎核心（评分公式 / 衰减 / 间隔 / 巩固）
-│   ├── store.js          # 本地 JSON 文件存储
+│   ├── index.js          # 插件入口：注册工具 / 命令 / 事件（含自动自查）
+│   ├── memory.js         # 记忆引擎核心（评分 / 衰减 / 间隔 / 巩固 / 日期）
+│   ├── store.js          # 目录式记忆库（memories/ + index.json）
 │   └── settings.js       # 配置加载与默认值
 ├── test/
-│   ├── self-test.mjs     # 核心逻辑自测（11 项）
-│   └── plugin-smoke.mjs  # 插件入口注册自测（8 项）
-├── 实现思路.md            # 设计文档
-├── 备选方案-人类记忆缺陷.md # 人类记忆缺陷的备选实现方案
-└── 测试文档.md            # 完整验收清单
+│   ├── self-test.mjs     # 核心逻辑自测（无需 DSH）
+│   ├── library-test.mjs  # 目录式记忆库与旧版迁移自测
+│   └── plugin-smoke.mjs  # 入口冒烟（mock DSH ctx）
+├── 实现思路.md
+├── 备选方案-人类记忆缺陷.md
+├── 测试文档.md
+└── 更新文档.md
+```
+
+运行时的记忆库结构（`~/.dsh/human-memory/`）：
+
+```
+human-memory/
+├── index.json                  # 人类可读索引（含日期、重要性、内容预览）
+└── memories/
+    ├── episodic/<id>.json      # 每条情节记忆一个文件
+    ├── semantic/<id>.json      # 语义记忆
+    └── core/<id>.json          # 核心记忆
 ```
 
 ## 安装
 
-本插件是**纯 ESM JavaScript，无需构建步骤**，直接安装即可加载。
-
-先把仓库克隆下来（本插件位于其子目录）：
-
-```sh
-git clone https://github.com/<你的用户名>/dsh-plugin.git
-cd dsh-plugin
-```
-
-然后把这个子目录挂进 DSH：
+本插件是**纯 ESM JavaScript，无需构建步骤**，直接安装即可加载：
 
 ```sh
 dsh plugin --profile <你的 profile> add ./dsh-human-memory
@@ -93,6 +85,7 @@ dsh plugin --profile <你的 profile> remove dsh-human-memory
 
 编辑 `settings.json`（支持 `//` 中文注释），保存后重启 DSH 生效。关键参数：
 
+- `autoCapture.enabled` / `minChars` / `maxPerTurn` / `includeAssistant` — 每轮自动自查开关与阈值
 - `forgetting.tauMs` / `c` — 遗忘曲线速度与形状
 - `importance.*` — 六维重要性权重（含「记忆时长」`dwell`）
 - `retrieval.*` — 检索排序权重
@@ -105,13 +98,16 @@ dsh plugin --profile <你的 profile> remove dsh-human-memory
 
 ## 如何验证插件是否正常工作
 
-### 1. 核心逻辑自测（不需要 DSH，最快）
+### 1. 核心逻辑与记忆库自测（不需要 DSH，最快）
 
 ```sh
+pnpm test        # 等价于 self-test + library-test
+# 或分别跑：
 node test/self-test.mjs
+node test/library-test.mjs
 ```
 
-覆盖 11 项：配置加载、六维重要性、时间衰减、间隔效应、检索排序、巩固、复习。应输出「11 通过，0 失败」。
+`self-test` 覆盖 16 项（配置、六维重要性、时间衰减、间隔效应、检索、巩固、复习、事件日期）；`library-test` 覆盖 9 项（目录式存储、旧版单文件迁移、删除、重启加载）。
 
 ### 2. 确认插件被 DSH 加载
 
@@ -129,10 +125,19 @@ node test/self-test.mjs
 
 ### 4. 检查本地数据
 
-记忆文件默认在 `~/.dsh/human-memory/memories.json`（Windows：`C:\Users\<你>\.dsh\human-memory\memories.json`）。第一次成功 `memory_write` 后该文件会出现，内容形如：
+记忆库默认在 `~/.dsh/human-memory/`（Windows：`C:\Users\<你>\.dsh\human-memory\`）。第一次成功写入后出现：
+
+```
+human-memory/
+├── index.json                  # 索引（含日期、重要性、内容预览）
+└── memories/
+    └── episodic/<id>.json      # 每条记忆独立成文件
+```
+
+记录形如（`occurredAt` 即「事件发生时间」）：
 
 ```json
-{ "version": 1, "memories": [ { "id": "mem-…", "content": "…", "layer": "episodic", "importance": 0.58 } ] }
+{ "id": "mem-…", "content": "…", "layer": "episodic", "occurredAt": 1793248628335, "importance": 0.58 }
 ```
 
 ### 5. 插件入口自测（可选，需要 mock 或 DSH 宿主提供 `@deepseek-ai/dsh-tools`）
@@ -141,12 +146,13 @@ node test/self-test.mjs
 node test/plugin-smoke.mjs
 ```
 
-用 mock ctx 跑一遍 `apply()`，验证 5 个工具、3 个命令的注册与落盘（8 项检查）。
+用 mock ctx 跑一遍 `apply()`，验证 5 个工具、3 个命令、自动自查与目录式落盘（13 项检查）。
 
 完整验收清单（含手动用例、边界、验收标准）见 [测试文档.md](./测试文档.md)。
 
 ## 当前限制（欢迎贡献）
 
+- **自动自查是启发式**（关键词 + 长度 + 提问/问候过滤），不是 LLM 语义判断，可能有漏记或误记；可用 `autoCapture` 调整。
 - 语义相关度用的是**字符 n-gram 相似度**，尚未接入 embedding（向量）模型，长文本语义匹配不够准。
 - 巩固的合并是**规则式**（拼连接 + 去重），尚未接入 LLM 做摘要提炼。
 - 自动复习的「由 DSH 主动 / 由用户命令触发」取舍尚未定案，见 [备选方案](./备选方案-人类记忆缺陷.md)。
