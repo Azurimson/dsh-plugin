@@ -15,6 +15,14 @@ export const DEFAULT_SETTINGS = {
     syncWrite: false,
     flushIntervalMs: 5000,
   },
+  database: {
+    enabled: true,
+    dir: '.index',
+    fileName: 'memory.sqlite',
+  },
+  emotion: {
+    threshold: 0.2,
+  },
   autoCapture: {
     enabled: true,
     minChars: 8,

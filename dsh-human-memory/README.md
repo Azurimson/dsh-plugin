@@ -1,6 +1,6 @@
 # dsh-human-memory
 
-> 版本 **0.1.2** ｜ 变化记录与测试方法见 [更新文档.md](./更新文档.md)
+> 版本 **0.1.3** ｜ 变化记录与测试方法见 [更新文档.md](./更新文档.md)
 
 给 DeepSeek Harness（DSH）赋予一套受认知科学启发的「人类式记忆」本地插件。
 
@@ -13,6 +13,9 @@
 - **行为记忆 + 时间线**：每轮记录「做了什么」，可按天 / 会话按顺序检索。
 - **工作记忆层**：精确记录「改了哪个文件、跑了哪些命令」，低权重、短寿命。
 - **事件日期**：每条记忆记录「事件发生时间」，可回答「这件事是什么时候发生的」。
+- **记忆粒度（gist / detail）**：默认只回梗概，细节需要 `detail` 才带出（对应「细节要重新接触才想起」）。
+- **情绪记忆**：多信号识别情绪（语气词、标点、强调、重复、反问、emoji），情绪核心优先保留。
+- **数据库索引**：内置 `node:sqlite` 加速「某天 / 某会话做了什么」的查询（文件仍是唯一真源）。
 - **设置区卡片**：打开记忆文件夹按钮 + 按权重排序的记忆列表。
 
 记忆**全部存在本地**（目录式记忆库，每条记忆独立成文件），不联网、不依赖任何云端数据库。
@@ -31,19 +34,24 @@ dsh-human-memory/
 ├── README.md
 ├── src/
 │   ├── index.js          # 插件入口：工具 / 命令 / 事件 / 自动自查
-│   ├── memory.js         # 记忆引擎核心（评分 / 衰减 / 间隔 / 巩固 / 日期 / 工作记忆）
-│   ├── store.js          # 目录式记忆库（memories/<layer>/ + index.json）
+│   ├── memory.js         # 记忆引擎核心（评分 / 衰减 / 间隔 / 巩固 / 粒度 / 情绪 / 工作记忆）
+│   ├── emotion.js        # 情绪识别（多信号加权）
+│   ├── index-db.js       # node:sqlite 索引（按天/会话查询）
+│   ├── store.js          # 目录式记忆库（memories/<layer>/ + index.json + trash/）
 │   ├── settings.js       # 配置加载与默认值
-│   └── gui.js            # 设置卡片的数据接口（本地 127.0.0.1）
+│   └── gui.js            # 设置卡片的数据接口（注册到 DSH webServer）
 ├── client/
-│   └── client.js         # 设置区卡片（lazy-CJS，注册到插件详情页）
+│   └── client.js         # 设置区卡片（lazy-CJS，注册到 settings.section）
 ├── test/
 │   ├── self-test.mjs     # 核心逻辑自测
+│   ├── emotion-test.mjs  # 情绪识别实测
 │   ├── library-test.mjs  # 目录式记忆库与迁移自测
 │   ├── consolidate-test.mjs # 巩固实测
+│   ├── db-test.mjs       # node:sqlite 索引实测
 │   ├── gui-test.mjs      # 记忆接口服务实测
 │   └── plugin-smoke.mjs  # 入口冒烟（mock DSH ctx）
 ├── 实现思路.md
+├── 设计-记忆类型与数据库.md
 ├── 备选方案-人类记忆缺陷.md
 ├── 测试文档.md
 ├── 更新文档.md
@@ -58,6 +66,7 @@ dsh-human-memory/
 human-memory/
 ├── index.json                  # 人类可读索引（含日期、重要性、内容预览）
 ├── state.json                  # 调度状态（上次巩固时间等）
+├── .index/memory.sqlite        # node:sqlite 索引（可删，重扫即重建）
 ├── trash/                      # 删除缓冲区：删除的记忆先移到这里，下次巩固时真正删除
 │   └── <id>.json
 └── memories/
@@ -87,10 +96,11 @@ dsh plugin --profile <你的 profile> remove dsh-human-memory
 
 | 工具 | 作用 |
 |------|------|
-| `memory_write` | 写入 / 再次提起一条记忆（间隔越久加深越多） |
-| `memory_recall` | 按「相关度 + 强度 + 重要性」回忆事实记忆 |
-| `memory_timeline` | 按天 / 会话按时间正序检索「每一轮做了什么」 |
+| `memory_write` | 写入 / 再次提起一条记忆（可带 details 细节） |
+| `memory_recall` | 按「相关度 + 强度 + 重要性」回忆；`detail` 控制是否返回细节 |
+| `memory_timeline` | 按天 / 会话按时间正序检索「每一轮做了什么」；`detail` 附带细节 |
 | `memory_forget` | 真正删除一条记忆 |
+| `memory_rescan` | 重新扫描记忆库并重建索引（用户发出指令时由 DSH 调用） |
 | `memory_consolidate` | 情节记忆 → 语义记忆 |
 | `memory_review` | 列出临近遗忘的记忆 |
 
@@ -99,11 +109,14 @@ dsh plugin --profile <你的 profile> remove dsh-human-memory
 - `/memory-review` — 列出临近遗忘的记忆
 - `/memory-consolidate` — 手动触发一次巩固
 - `/memory-list` — 列出所有本地记忆
+- `/memory-rescan` — 重新扫描记忆库并重建索引
 
 ## 设置区卡片
 
 - 位置：**设置页左侧「记忆」分区**（`settings.section` 槽，参考 `dsh-notify-say` 的做法）。
-- 内容：顶部「打开记忆文件夹」按钮 + 刷新；下方按权重（`importance`）倒序的记忆列表（不显示权重数字；有来源会话时显示短 id；右侧有删除按钮）。
+- 顶部：一排文件夹按钮 **全部 / 工作 / 情节 / 语义 / 核心 / 回收站**（带数量），点击后只看该文件夹的记忆。
+- 右上角：**权重↓**（按 `importance` 从大到小，默认）、**时间↓**（按 `occurredAt` 从新到旧）、刷新、打开记忆文件夹。
+- 列表项显示层级、行为/操作标记、发生时间、来源会话短 id；右侧有删除（回收站里是恢复）按钮。
 - 删除：点击**不弹确认**、立即从列表移除；记录被**移动**到记忆库的 `trash/` 文件夹（可备份/恢复），下次巩固时真正删除。
 - 数据来源：DSH 内置 Web 服务器上的路由 `/api/dsh-human-memory/memories`、`/api/dsh-human-memory/delete`、`/api/dsh-human-memory/trash`、`/api/dsh-human-memory/restore`、`/api/dsh-human-memory/open-folder`（不占用独立端口）。
 - 说明：卡片在浏览器半，读不到宿主内存，所以通过宿主路由取数据；它不是网页 GUI，也没有独立页面。
@@ -115,6 +128,8 @@ dsh plugin --profile <你的 profile> remove dsh-human-memory
 - `autoCapture.enabled` / `minChars` / `maxPerTurn` / `includeAssistant` — 每轮自动自查开关与阈值
 - `autoCapture.turnLog` — 是否记录「行为记忆」（供时间线检索）
 - `storage.trashDir` — 删除缓冲区文件夹名（默认 `trash`，位于记忆库根目录）
+- `database.enabled` / `dir` / `fileName` — node:sqlite 索引（默认 `.index/memory.sqlite`，可删重建）
+- `emotion.threshold` — 情绪强度达到该值才记为情绪记忆（默认 0.2）
 - `workingMemory.enabled` / `capacity` / `minRetentionMs` / `importance` — 工作记忆（`capacity: 0` 不设上限；`minRetentionMs` 默认 24h，只在 24h 巩固节点回收）
 - `gui.enabled` — 是否注册设置卡片的数据路由
 - `forgetting.tauMs` / `c` — 遗忘曲线速度与形状
@@ -131,19 +146,22 @@ dsh plugin --profile <你的 profile> remove dsh-human-memory
 ### 1. 核心逻辑与记忆库自测（不需要 DSH，最快）
 
 ```sh
-pnpm test        # self-test + library-test + consolidate-test + gui-test
+pnpm test        # self + emotion + library + consolidate + db + gui + client
 # 或分别跑：
 node test/self-test.mjs
+node test/emotion-test.mjs
 node test/library-test.mjs
 node test/consolidate-test.mjs
+node test/db-test.mjs
 node test/gui-test.mjs
+node test/client-test.mjs
 ```
 
-`self-test` 27 项、`library-test` 15 项、`consolidate-test` 10 项、`gui-test` 17 项。
+`self-test` 32 项、`emotion-test` 9 项、`library-test` 15 项、`consolidate-test` 10 项、`db-test` 8 项、`gui-test` 17 项、`client-test` 4 项。
 
 ### 2. 确认插件被 DSH 加载
 
-重启 DSH 后，若之前的激活警告消失，即说明已加载。也可在对话里说「列出你当前可用的 memory 相关工具」，应能看到 `memory_write` / `memory_recall` / `memory_timeline` / `memory_forget` / `memory_consolidate` / `memory_review`。
+重启 DSH 后，若之前的激活警告消失，即说明已加载。也可在对话里说「列出你当前可用的 memory 相关工具」，应能看到 `memory_write` / `memory_recall` / `memory_timeline` / `memory_forget` / `memory_rescan` / `memory_consolidate` / `memory_review`。
 
 ### 3. 端到端功能测试
 
@@ -177,7 +195,7 @@ node test/gui-test.mjs
 node test/plugin-smoke.mjs
 ```
 
-用 mock ctx 跑一遍 `apply()`，验证 6 个工具、3 个命令、自动自查、行为/工作记忆（含去重）与目录式落盘（20 项检查）。
+用 mock ctx 跑一遍 `apply()`，验证 7 个工具、4 个命令、自动自查、行为/工作记忆（含去重）、`memory_rescan` 与目录式落盘（22 项检查）。
 
 完整验收清单见 [测试文档.md](./测试文档.md)。
 
@@ -188,6 +206,8 @@ node test/plugin-smoke.mjs
 ## 当前限制（欢迎贡献）
 
 - **设置区卡片**注册在 `settings.section`（设置页左侧「记忆」分区），数据走 DSH 内置 Web 服务器的 `/api/dsh-human-memory` 路由。
+- **数据库索引**用 Node 内置 `node:sqlite`（零额外构建），文件仍是唯一真源；外部改动需通过 `memory_rescan` 重扫。
+- **情绪识别**是本地启发式（多信号加权），不是 LLM 语义判断，可能误判；可调 `emotion.threshold`。
 - **工作记忆**默认不设条数上限，靠 24 小时 TTL 在巩固节点回收；参与召回、复习与巩固，但权重刻意很低（0.05）；同一会话同一操作会去重。
 - **巩固与工作记忆回收**每 24 小时执行一次（`consolidation.intervalMs`），不是每轮。
 - **工作记忆**目前只记录工具调用（文件/命令），尚未记录更细粒度的参数 diff。

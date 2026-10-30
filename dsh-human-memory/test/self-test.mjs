@@ -233,5 +233,40 @@ check('软删除后不参与复习与巩固', () => {
   assert.strictEqual(engine.dueForReview([a], now).length, 0)
 })
 
+// ---------- 粒度（gist/detail）、情绪、细节 facet ----------
+check('默认写入 fidelity=gist', () => {
+  const rec = engine.write({ content: '普通记忆' })
+  assert.strictEqual(rec.fidelity, 'gist')
+})
+
+check('写入时可标记 fidelity=detail', () => {
+  const rec = engine.write({ content: '细节：a.txt', fidelity: 'detail' })
+  assert.strictEqual(rec.fidelity, 'detail')
+})
+
+check('默认召回不含 detail 记录', () => {
+  const g = engine.write({ content: '梗概记忆' })
+  const d = engine.write({ content: '细节记忆', fidelity: 'detail' })
+  const hits = engine.recall([g, d], '记忆', 10)
+  assert(!hits.some((h) => h.id === d.id))
+})
+
+check('detail=true 时召回 detail 记录', () => {
+  const g = engine.write({ content: '梗概记忆2' })
+  const d = engine.write({ content: '细节记忆2', fidelity: 'detail' })
+  const hits = engine.recall([g, d], '记忆2', 10, Date.now(), true)
+  assert(hits.some((h) => h.id === d.id))
+})
+
+check('details 与情绪字段随召回返回', () => {
+  const rec = engine.write({ content: '哇你又犯错了', details: ['文件：a.txt'] })
+  assert.strictEqual(rec.emotionKind, 'frustration')
+  assert(rec.emotionIntensity > 0.2)
+  assert.deepStrictEqual(rec.details, ['文件：a.txt'])
+  const hits = engine.recall([rec], '犯错')
+  assert.strictEqual(hits[0].emotionKind, 'frustration')
+  assert.deepStrictEqual(hits[0].details, ['文件：a.txt'])
+})
+
 console.log(`\n结果：${passed} 通过，${failed} 失败`)
 process.exit(failed ? 1 : 0)

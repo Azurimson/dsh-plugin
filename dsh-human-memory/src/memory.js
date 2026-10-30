@@ -4,7 +4,10 @@
 //   2. 内容重要性评分（六维，含「记忆时长」）
 //   3. 间隔重复 + 间隔效应（间隔越长，再次提起加权越高）
 //   4. 巩固（只扫高价值情节记忆，合并成语义记忆）
+// 以及 0.1.3 新增的「粒度（gist/detail）」「情绪 facet」「细节 facet」。
 // 本文件不依赖任何 DSH 运行时，可独立运行/测试。
+
+import { detectEmotion } from './emotion.js'
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v)
 
@@ -178,10 +181,19 @@ export class MemoryEngine {
   // 4. 检索（综合相关度 + 强度 + 重要性排序）
   // ------------------------------------------------------------------
 
-  recall(records, query, limit = 10, now = Date.now()) {
+  /**
+   * 检索记忆。
+   * @param records 全部记录
+   * @param query 查询文本
+   * @param limit 最多返回条数
+   * @param now 当前时间
+   * @param detail 是否返回「细节」记录（fidelity=detail）；默认只返回梗概
+   */
+  recall(records, query, limit = 10, now = Date.now(), detail = false) {
     const w = this.retWeights
     return records
       .filter((r) => !r.archived && !r.deletedAt && r.kind !== 'turn')
+      .filter((r) => detail || r.fidelity !== 'detail')
       .map((r) => {
         const relevance = similarity(query, r.content)
         const s = this.strength(r, now)
@@ -190,6 +202,11 @@ export class MemoryEngine {
           id: r.id,
           content: r.content,
           layer: r.layer,
+          fidelity: r.fidelity ?? 'gist',
+          details: Array.isArray(r.details) ? r.details : [],
+          emotionKind: r.emotionKind ?? 'neutral',
+          emotionIntensity: r.emotionIntensity ?? 0,
+          emotionCore: r.emotionCore ?? '',
           score,
           strength: s,
           relevance,
@@ -207,14 +224,16 @@ export class MemoryEngine {
    * @param records 全部记忆
    * @param opts.date 可选，YYYY-MM-DD；不传则不限日期
    * @param opts.sessionId 可选，只看某个会话
+   * @param opts.detail 是否附带细节（details 字段）
    * @param limit 最多返回条数
    */
   timeline(records, opts = {}, limit = 200) {
-    const { date, sessionId } = opts
+    const { date, sessionId, detail = false } = opts
     const dayStart = date ? parseTime(date) : null
     const dayEnd = dayStart != null ? dayStart + 86_400_000 : null
     return records
       .filter((r) => r.kind === 'turn')
+      .filter((r) => detail || r.fidelity !== 'detail')
       .filter((r) => !sessionId || r.sessionId === sessionId)
       .filter((r) => {
         if (dayStart == null) return true
@@ -223,6 +242,17 @@ export class MemoryEngine {
       })
       .sort((a, b) => (a.occurredAt ?? a.createdAt ?? 0) - (b.occurredAt ?? b.createdAt ?? 0))
       .slice(0, limit)
+      .map((r) => ({
+        id: r.id,
+        content: r.content,
+        details: Array.isArray(r.details) ? r.details : [],
+        fidelity: r.fidelity ?? 'gist',
+        emotionKind: r.emotionKind ?? 'neutral',
+        emotionIntensity: r.emotionIntensity ?? 0,
+        occurredAt: r.occurredAt ?? r.createdAt,
+        sessionId: r.sessionId ?? '',
+        turn: r.turn ?? 0,
+      }))
   }
 
   /**
@@ -333,11 +363,21 @@ export class MemoryEngine {
     // occurredAt = 事件真正发生的时间；缺省用写入时间
     const occurredAt = parseTime(input.occurredAt) ?? now
     const kind = input.kind ?? 'fact'
+    // 粒度：gist（梗概，默认可见）/ detail（细节，需要线索才返回）
+    const fidelity = input.fidelity ?? 'gist'
+    const details = Array.isArray(input.details) ? input.details : []
+    // 情绪 facet：未显式提供时本地识别
+    const emo = input.emotion ?? detectEmotion(input.content)
+    const emotionThreshold = this.settings.emotion?.threshold ?? 0.2
+    // 情绪强度也参与重要性（取原有启发式与识别结果的较大值）
+    factors.emotion = Math.max(factors.emotion ?? 0, clamp01(emo.intensity))
     // importance 可显式覆盖（工作记忆刻意用很低的值）
     const importance = input.importance != null ? clamp01(input.importance) : this.computeImportance(factors)
 
     if (existing) {
       const reinforced = this.reinforce(existing, now)
+      const prevIntensity = existing.emotionIntensity ?? 0
+      const nextIntensity = Math.max(prevIntensity, emo.intensity)
       return {
         ...reinforced,
         content: input.content,
@@ -346,6 +386,11 @@ export class MemoryEngine {
         // 保留最早的「发生时间」，不因再次提起而覆盖
         occurredAt: existing.occurredAt ?? occurredAt,
         kind: existing.kind ?? kind,
+        fidelity: existing.fidelity ?? fidelity,
+        details: Array.isArray(existing.details) && existing.details.length ? existing.details : details,
+        emotionIntensity: nextIntensity,
+        emotionKind: emo.intensity > prevIntensity ? emo.kind : (existing.emotionKind ?? 'neutral'),
+        emotionCore: existing.emotionCore || emo.core,
       }
     }
 
@@ -355,6 +400,11 @@ export class MemoryEngine {
       content: input.content,
       layer: input.layer ?? 'episodic',
       kind,
+      fidelity,
+      details,
+      emotionKind: emo.intensity >= emotionThreshold ? emo.kind : 'neutral',
+      emotionIntensity: emo.intensity,
+      emotionCore: emo.core,
       createdAt: now,
       occurredAt,
       lastAccessedAt: now,

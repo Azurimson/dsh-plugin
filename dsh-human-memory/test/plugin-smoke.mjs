@@ -43,15 +43,17 @@ const check = (name, cond) => {
 mod.apply(ctx)
 
 // ---------- 注册 ----------
-check('apply() 注册 6 个工具', tools.length === 6)
-check('注册 3 个斜杠命令', commands.length === 3)
+check('apply() 注册 7 个工具', tools.length === 7)
+check('注册 4 个斜杠命令', commands.length === 4)
 check('注册 agent/turn-stopping 监听', handlers.has('agent/turn-stopping'))
 check('注册 session/event 监听（自动自查）', handlers.has('session/event'))
 
 const write = tools.find((t) => t.name === 'memory_write')
 const recall = tools.find((t) => t.name === 'memory_recall')
 const timeline = tools.find((t) => t.name === 'memory_timeline')
+const rescan = tools.find((t) => t.name === 'memory_rescan')
 const listCmd = commands.find((c) => c.name === 'memory-list')
+check('注册 memory_rescan 工具', !!rescan)
 
 // ---------- 显式写入 / 召回 ----------
 const w = await write.execute({ content: '测试：这个项目用 Python 和 Vue 开发', layer: 'episodic', dwellMs: 600000 })
@@ -112,6 +114,13 @@ emit('session/event', { id: sid2 }, {
 emit('agent/turn-stopping', { agent: { id: sid2 }, turn: 1, signal: new AbortController().signal })
 const qHits = await recall.execute({ query: '数据库 用的是什么', limit: 10 })
 check('提问不会被自动写入事实记忆', !qHits.some((h) => h.content.includes('数据库用的是什么')))
+
+// ---------- 重新扫描（memory_rescan） ----------
+const rescanned = await rescan.execute({})
+check(
+  'memory_rescan 返回加载数与索引数',
+  typeof rescanned.count === 'number' && rescanned.count >= 1 && typeof rescanned.indexed === 'number',
+)
 
 // ---------- 落盘（目录式记忆库） ----------
 for (const e of effects) {

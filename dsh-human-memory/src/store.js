@@ -30,13 +30,14 @@ export function resolveDataDir(dataDir) {
 const LAYERS = ['working', 'episodic', 'semantic', 'core']
 
 export class MemoryLibrary {
-  constructor(dataDir, fileName, syncWrite, flushIntervalMs, trashDirName) {
+  constructor(dataDir, fileName, syncWrite, flushIntervalMs, trashDirName, index) {
     this.rootDir = resolveDataDir(dataDir)
     this.legacyName = fileName || 'memories.json'
     this.memoriesDir = join(this.rootDir, 'memories')
     this.trashDir = join(this.rootDir, trashDirName || 'trash')
     this.indexPath = join(this.rootDir, 'index.json')
     this.statePath = join(this.rootDir, 'state.json')
+    this.index = index || null
     this.syncWrite = syncWrite
     this.memories = []
     this.persisted = new Map() // id -> 上次写入的文件路径
@@ -46,11 +47,18 @@ export class MemoryLibrary {
     this._state = { lastConsolidationAt: 0 }
 
     this.load()
+    // 启动时用文件重建/同步 SQLite 索引
+    if (this.index) this.index.rebuild(this.memories, (r) => this.relPath(r))
     if (!syncWrite) {
       this.flushTimer = setInterval(() => this.flush(), flushIntervalMs)
       this.flushTimer.unref?.()
       process.once('beforeExit', () => this.flush())
     }
+  }
+
+  /** 记录在记忆库根目录下的相对路径（供索引使用）。 */
+  relPath(record) {
+    return `memories/${record.layer ?? 'episodic'}/${record.id}.json`
   }
 
   // ------------------------------------------------------------------
@@ -168,6 +176,7 @@ export class MemoryLibrary {
     else this.memories.push(record)
     this.dirty.add(record.id)
     this.removed.delete(record.id)
+    if (this.index) this.index.upsert(record, this.relPath(record))
     if (this.syncWrite) this.flush()
   }
 
@@ -177,6 +186,7 @@ export class MemoryLibrary {
     this.memories.splice(idx, 1)
     this.dirty.delete(id)
     this.removed.add(id)
+    if (this.index) this.index.remove(id)
     if (this.syncWrite) this.flush()
     return true
   }
@@ -274,7 +284,26 @@ export class MemoryLibrary {
     }
     this.memories = records
     for (const r of records) this.dirty.add(r.id)
+    if (this.index) this.index.rebuild(records, (r) => this.relPath(r))
     if (this.syncWrite) this.flush()
+  }
+
+  /**
+   * 从磁盘重新加载全部记忆并重建索引。
+   * 供 `memory_rescan` 使用：用户让 DSH 重新扫描记忆库（例如外部改动文件后）。
+   */
+  reload() {
+    // 先把未落盘的改动写入磁盘，避免重新扫描时丢失内存中的记录
+    this.flush()
+    this.memories = []
+    this.persisted.clear()
+    this.dirty.clear()
+    this.removed.clear()
+    this.loadRecords()
+    this.loadState()
+    this.migrateDeleted()
+    if (this.index) this.index.rebuild(this.memories, (r) => this.relPath(r))
+    return this.memories.length
   }
 
   // ------------------------------------------------------------------

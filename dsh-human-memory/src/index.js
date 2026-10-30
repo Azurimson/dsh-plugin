@@ -4,8 +4,10 @@
 // 同时启动本地 GUI 服务（设置卡片 / 浏览器访问）。
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { join } from 'node:path'
 import { MemoryEngine, formatDate, parseTime } from './memory.js'
-import { MemoryLibrary } from './store.js'
+import { MemoryLibrary, resolveDataDir } from './store.js'
+import { MemoryIndex } from './index-db.js'
 import { loadSettings } from './settings.js'
 import { registerMemoryRoutes } from './gui.js'
 
@@ -25,12 +27,27 @@ function textOf(content) {
 export function apply(ctx) {
   const settings = loadSettings()
   const engine = new MemoryEngine(settings)
+
+  // 记忆库根目录 + SQLite 索引（node:sqlite，零额外构建）
+  const memoryRoot = resolveDataDir(settings.storage.dataDir)
+  let memoryIndex = null
+  if (settings.database?.enabled !== false) {
+    try {
+      const dbDir = settings.database?.dir || '.index'
+      const dbFile = settings.database?.fileName || 'memory.sqlite'
+      memoryIndex = new MemoryIndex(join(memoryRoot, dbDir, dbFile))
+    } catch (err) {
+      console.warn('[dsh-human-memory] SQLite 索引初始化失败：', err)
+    }
+  }
+
   const store = new MemoryLibrary(
     settings.storage.dataDir,
     settings.storage.fileName,
     settings.storage.syncWrite,
     settings.storage.flushIntervalMs,
     settings.storage.trashDir,
+    memoryIndex,
   )
 
   // ---------- 设置卡片的数据接口（注册到 DSH 内置 Web 服务器） ----------
@@ -61,8 +78,15 @@ export function apply(ctx) {
     }
   }
 
-  // 卸载时落盘
-  ctx.effect(() => () => store.dispose())
+  // 卸载时落盘并关闭索引
+  ctx.effect(() => () => {
+    store.dispose()
+    try {
+      memoryIndex?.close()
+    } catch {
+      /* ignore */
+    }
+  })
 
   // ------------------------------------------------------------------
   // 巩固 + 工作记忆回收：同一个 24 小时节奏
@@ -225,6 +249,7 @@ export function apply(ctx) {
       content,
       layer: 'working',
       kind: 'tool',
+      fidelity: 'detail',
       sessionId,
       occurredAt,
       importance: settings.workingMemory?.importance ?? 0.05,
@@ -306,6 +331,7 @@ export function apply(ctx) {
         dwellMs: { type: 'number', description: '在这件事上累计停留的时长（毫秒）。可选。' },
         occurredAt: { type: 'json', description: '事件发生时间（可选）：ISO 字符串、YYYY-MM-DD 或 epoch 毫秒。' },
         sessionId: { type: 'string', description: '产生该记忆的会话 id（可选，用于区分不同会话，避免混淆）' },
+        details: { type: 'array', items: { type: 'string' }, description: '细节列表（可选）：文件、命令、周边信息等；默认不返回，需要 detail 才带出' },
       },
       output: {
         schema: {
@@ -331,8 +357,9 @@ export function apply(ctx) {
         const dwellMs = typeof args.dwellMs === 'number' ? args.dwellMs : 0
         const occurredAt = parseTime(args.occurredAt)
         const sessionId = typeof args.sessionId === 'string' && args.sessionId ? args.sessionId : undefined
+        const details = Array.isArray(args.details) ? args.details.filter((d) => typeof d === 'string') : []
         const existing = store.all().find((m) => m.content === content)
-        const record = engine.write({ content, layer, dwellMs, occurredAt, sessionId }, existing)
+        const record = engine.write({ content, layer, dwellMs, occurredAt, sessionId, details }, existing)
         store.upsert(record)
         return { id: record.id, importance: record.importance, layer: record.layer, occurredAt: record.occurredAt }
       },
@@ -345,10 +372,13 @@ export function apply(ctx) {
   ctx.tools.register(
     defineTool({
       name: 'memory_recall',
-      description: '回忆与查询相关的事实记忆，返回按「相关度 + 记忆强度 + 重要性」排序的结果，并带事件发生时间。',
+      description:
+        '回忆与查询相关的记忆，返回按「相关度 + 记忆强度 + 重要性」排序的结果，并带事件发生时间与情绪标记。' +
+        '默认只返回梗概；需要细节时传 detail=true。',
       parameters: {
         query: { type: 'string', required: true, description: '要回忆的主题 / 关键词' },
         limit: { type: 'integer', description: '最多返回条数，默认 10' },
+        detail: { type: 'boolean', description: '是否返回细节记录（默认 false，只返回梗概）' },
       },
       output: {
         schema: {
@@ -360,6 +390,11 @@ export function apply(ctx) {
               id: { type: 'string' },
               content: { type: 'string' },
               layer: { type: 'string' },
+              fidelity: { type: 'string' },
+              details: { type: 'array', items: { type: 'string' } },
+              emotionKind: { type: 'string' },
+              emotionIntensity: { type: 'number' },
+              emotionCore: { type: 'string' },
               score: { type: 'number' },
               occurredAt: { type: 'number' },
               sessionId: { type: 'string' },
@@ -371,14 +406,21 @@ export function apply(ctx) {
           if (!hits.length) return [{ type: 'text', text: '没有回忆起相关内容。' }]
           const lines = hits.map((h, i) => {
             const sid = h.sessionId ? `（会话 ${String(h.sessionId).slice(0, 8)}）` : ''
-            return `${i + 1}. [${Number(h.score).toFixed(2)}] [${formatDate(h.occurredAt)}] ${h.content}${sid}`
+            const emo =
+              h.emotionIntensity >= 0.2
+                ? ` [情绪:${h.emotionKind} ${Number(h.emotionIntensity).toFixed(2)}]`
+                : ''
+            const head = `${i + 1}. [${Number(h.score).toFixed(2)}] [${formatDate(h.occurredAt)}] ${h.content}${emo}${sid}`
+            const detailLines = Array.isArray(h.details) && h.details.length ? h.details.map((d) => `   · ${d}`) : []
+            return [head, ...detailLines].join('\n')
           })
           return [{ type: 'text', text: lines.join('\n') }]
         },
       },
       async execute(args) {
         const limit = typeof args.limit === 'number' ? args.limit : 10
-        const hits = engine.recall(store.all(), String(args.query), limit)
+        const detail = args.detail === true
+        const hits = engine.recall(store.all(), String(args.query), limit, Date.now(), detail)
         const now = Date.now()
         for (const hit of hits) {
           const rec = store.get(hit.id)
@@ -388,6 +430,11 @@ export function apply(ctx) {
           id: h.id,
           content: h.content,
           layer: h.layer,
+          fidelity: h.fidelity,
+          details: h.details ?? [],
+          emotionKind: h.emotionKind ?? 'neutral',
+          emotionIntensity: h.emotionIntensity ?? 0,
+          emotionCore: h.emotionCore ?? '',
           score: h.score,
           occurredAt: h.occurredAt,
           sessionId: h.sessionId ?? '',
@@ -402,10 +449,11 @@ export function apply(ctx) {
   ctx.tools.register(
     defineTool({
       name: 'memory_timeline',
-      description: '按天或按会话检索「每一轮做了什么」，按时间正序返回，可用于回答「那天那个会话做了什么」。',
+      description: '按天或按会话检索「每一轮做了什么」，按时间正序返回，可用于回答「那天那个会话做了什么」。传 detail=true 可附带细节。',
       parameters: {
         date: { type: 'string', description: '日期 YYYY-MM-DD（可选，不填则不限日期）' },
         sessionId: { type: 'string', description: '会话 id（可选）' },
+        detail: { type: 'boolean', description: '是否附带细节（默认 false）' },
         limit: { type: 'integer', description: '最多返回条数，默认 50' },
       },
       output: {
@@ -417,6 +465,10 @@ export function apply(ctx) {
             properties: {
               id: { type: 'string' },
               content: { type: 'string' },
+              details: { type: 'array', items: { type: 'string' } },
+              fidelity: { type: 'string' },
+              emotionKind: { type: 'string' },
+              emotionIntensity: { type: 'number' },
               occurredAt: { type: 'number' },
               sessionId: { type: 'string' },
               turn: { type: 'number' },
@@ -426,16 +478,30 @@ export function apply(ctx) {
         render: (_args, value) => {
           const rows = value
           if (!rows.length) return [{ type: 'text', text: '该时间范围内没有行为记录。' }]
-          const lines = rows.map((r) => `- [${formatDate(r.occurredAt)}] ${r.content}`)
+          const lines = rows.map((r) => {
+            const emo = r.emotionIntensity >= 0.2 ? ` [情绪:${r.emotionKind} ${Number(r.emotionIntensity).toFixed(2)}]` : ''
+            const head = `- [${formatDate(r.occurredAt)}] ${r.content}${emo}`
+            const detailLines = Array.isArray(r.details) && r.details.length ? r.details.map((d) => `   · ${d}`) : []
+            return [head, ...detailLines].join('\n')
+          })
           return [{ type: 'text', text: '行为时间线：\n' + lines.join('\n') }]
         },
       },
       async execute(args) {
         const limit = typeof args.limit === 'number' ? args.limit : 50
-        const rows = engine.timeline(store.all(), { date: args.date, sessionId: args.sessionId }, limit)
+        const detail = args.detail === true
+        const rows = engine.timeline(
+          store.all(),
+          { date: args.date, sessionId: args.sessionId, detail },
+          limit,
+        )
         return rows.map((r) => ({
           id: r.id,
           content: r.content,
+          details: r.details ?? [],
+          fidelity: r.fidelity ?? 'gist',
+          emotionKind: r.emotionKind ?? 'neutral',
+          emotionIntensity: r.emotionIntensity ?? 0,
           occurredAt: r.occurredAt ?? r.createdAt,
           sessionId: r.sessionId ?? '',
           turn: r.turn ?? 0,
@@ -458,6 +524,30 @@ export function apply(ctx) {
       },
       async execute(args) {
         return { removed: store.remove(String(args.id)) }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_rescan',
+      description:
+        '重新扫描记忆库并从文件重建索引。当用户要求「重新扫描记忆」「刷新记忆库」，或外部改动过记忆文件后，应调用本工具。',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { count: { type: 'number' }, indexed: { type: 'number' } },
+        },
+        render: (_args, value) => [
+          { type: 'text', text: `已重新扫描：加载 ${value.count} 条记忆，索引 ${value.indexed} 条。` },
+        ],
+      },
+      async execute() {
+        const count = store.reload()
+        const stats = memoryIndex?.stats() || { count: 0 }
+        return { count, indexed: stats.count }
       },
     }),
   )
@@ -573,6 +663,15 @@ export function apply(ctx) {
           (m) => `- [${m.layer}${m.kind === 'turn' ? '/行为' : ''}${m.archived ? '/已归档' : ''}] [${formatDate(m.occurredAt ?? m.createdAt)}] ${m.content}`,
         )
         return { kind: 'success', text: lines.join('\n') }
+      },
+    })
+    commands.register({
+      name: 'memory-rescan',
+      description: '重新扫描记忆库并重建索引',
+      handler() {
+        const count = store.reload()
+        const stats = memoryIndex?.stats() || { count: 0 }
+        return { kind: 'success', text: `已重新扫描：加载 ${count} 条记忆，索引 ${stats.count} 条。` }
       },
     })
   }
