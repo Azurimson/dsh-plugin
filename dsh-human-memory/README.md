@@ -1,3 +1,5 @@
+> 中文 | [English](./README.en.md)
+
 # dsh-human-memory
 
 > 版本 **0.1.4** ｜ 变化记录与测试方法见 [更新文档.md](./更新文档.md)

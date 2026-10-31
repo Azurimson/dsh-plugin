@@ -1,3 +1,5 @@
+> 中文 | [English](./README.en.md)
+
 # dsh-plugin
 
 DeepSeek Harness（DSH）插件合集。每个插件一个子目录，互相独立、按需安装。
