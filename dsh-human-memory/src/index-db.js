@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS memories (
   kind TEXT,
   fidelity TEXT,
   session_id TEXT,
+  event_id TEXT,
+  source TEXT,
+  status TEXT,
+  confidence REAL,
+  cues_json TEXT,
   occurred_at INTEGER NOT NULL,
   importance REAL,
   emotion_kind TEXT,
@@ -29,7 +34,18 @@ CREATE INDEX IF NOT EXISTS idx_session_time ON memories(session_id, occurred_at)
 CREATE INDEX IF NOT EXISTS idx_emotion      ON memories(emotion_kind, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_layer_time   ON memories(layer, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_fidelity     ON memories(fidelity, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_event        ON memories(event_id);
+CREATE INDEX IF NOT EXISTS idx_status       ON memories(status);
 `
+
+/** 旧库补列（0.1.4 新增字段）。 */
+const ADD_COLUMNS = [
+  ['event_id', 'TEXT'],
+  ['source', 'TEXT'],
+  ['status', 'TEXT'],
+  ['confidence', 'REAL'],
+  ['cues_json', 'TEXT'],
+]
 
 export class MemoryIndex {
   constructor(dbPath) {
@@ -40,14 +56,23 @@ export class MemoryIndex {
       mkdirSync(dirname(dbPath), { recursive: true })
       this.db = new DatabaseSync(dbPath)
       this.db.exec(SCHEMA)
+      for (const [col, type] of ADD_COLUMNS) {
+        try {
+          this.db.exec(`ALTER TABLE memories ADD COLUMN ${col} ${type}`)
+        } catch {
+          /* 列已存在 */
+        }
+      }
       this.upsertStmt = this.db.prepare(`
         INSERT INTO memories (
-          id, path, layer, kind, fidelity, session_id, occurred_at, importance,
-          emotion_kind, emotion_intensity, gist, details_json, deleted_at, mtime, size
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, path, layer, kind, fidelity, session_id, event_id, source, status, confidence, cues_json,
+          occurred_at, importance, emotion_kind, emotion_intensity, gist, details_json, deleted_at, mtime, size
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           path=excluded.path, layer=excluded.layer, kind=excluded.kind, fidelity=excluded.fidelity,
-          session_id=excluded.session_id, occurred_at=excluded.occurred_at, importance=excluded.importance,
+          session_id=excluded.session_id, event_id=excluded.event_id, source=excluded.source,
+          status=excluded.status, confidence=excluded.confidence, cues_json=excluded.cues_json,
+          occurred_at=excluded.occurred_at, importance=excluded.importance,
           emotion_kind=excluded.emotion_kind, emotion_intensity=excluded.emotion_intensity,
           gist=excluded.gist, details_json=excluded.details_json, deleted_at=excluded.deleted_at,
           mtime=excluded.mtime, size=excluded.size
@@ -70,6 +95,11 @@ export class MemoryIndex {
         record.kind ?? 'fact',
         record.fidelity ?? 'gist',
         record.sessionId ?? null,
+        record.eventId ?? null,
+        record.source ?? 'unknown',
+        record.status ?? 'active',
+        record.confidence ?? 1,
+        JSON.stringify(record.cues ?? {}),
         record.occurredAt ?? record.createdAt ?? Date.now(),
         record.importance ?? 0,
         record.emotionKind ?? 'neutral',

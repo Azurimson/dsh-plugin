@@ -5,9 +5,11 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { MemoryEngine, formatDate, parseTime } from './memory.js'
 import { MemoryLibrary, resolveDataDir } from './store.js'
 import { MemoryIndex } from './index-db.js'
+import { loadPersona, setPersonaPath, suggestPersonaDeltas } from './persona.js'
 import { loadSettings } from './settings.js'
 import { registerMemoryRoutes } from './gui.js'
 
@@ -24,12 +26,24 @@ function textOf(content) {
     .join('\n')
 }
 
+/** 读 JSON 文件；失败返回 null。 */
+function readJsonSafe(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 export function apply(ctx) {
   const settings = loadSettings()
   const engine = new MemoryEngine(settings)
 
   // 记忆库根目录 + SQLite 索引（node:sqlite，零额外构建）
   const memoryRoot = resolveDataDir(settings.storage.dataDir)
+  // 人格参数网：默认值 → settings.persona → persona.json
+  const personaPath = join(memoryRoot, 'persona.json')
+  const persona = loadPersona(settings, readJsonSafe(personaPath))
   let memoryIndex = null
   if (settings.database?.enabled !== false) {
     try {
@@ -185,6 +199,31 @@ export function apply(ctx) {
     return b
   }
 
+  const eventIdBySession = new Map()
+
+  /** 同一轮的记录共用一个 eventId（分布式记忆靠它聚合）。 */
+  function eventIdFor(sessionId, turn) {
+    const id = `evt-${sessionId ?? 'unknown'}-${turn ?? 0}`
+    if (sessionId) eventIdBySession.set(sessionId, id)
+    return id
+  }
+
+  function currentEventId(sessionId) {
+    return eventIdBySession.get(sessionId) ?? `evt-${sessionId ?? 'unknown'}-unknown`
+  }
+
+  /** 从文本粗提线索（2~6 字中文词 / 3+ 字母词 + 日期）。 */
+  function cuesFor(text, occurredAt) {
+    const topics = []
+    const words = String(text ?? '').match(/[\u4e00-\u9fff]{2,6}|[a-z0-9_]{3,}/gi) ?? []
+    for (const w of words) {
+      if (!topics.includes(w)) topics.push(w)
+    }
+    const d = new Date(occurredAt ?? Date.now())
+    const time = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    return { topic: topics.slice(0, 5), time }
+  }
+
   function autoCaptureFacts(sessionId, buf) {
     const cfg = settings.autoCapture ?? {}
     const candidates = []
@@ -205,7 +244,19 @@ export function apply(ctx) {
       if (seen.has(content)) continue
       seen.add(content)
       const existing = store.all().find((m) => m.content === content && (m.sessionId ?? '') === (sessionId ?? ''))
-      const rec = engine.write({ content, layer: 'episodic', occurredAt: buf.occurredAt, sessionId }, existing)
+      const rec = engine.write(
+        {
+          content,
+          layer: 'episodic',
+          occurredAt: buf.occurredAt,
+          sessionId,
+          eventId: currentEventId(sessionId),
+          cues: cuesFor(content, buf.occurredAt),
+          source: 'user',
+          status: 'active',
+        },
+        existing,
+      )
       store.upsert(rec)
       added += 1
     }
@@ -252,6 +303,10 @@ export function apply(ctx) {
       fidelity: 'detail',
       sessionId,
       occurredAt,
+      eventId: currentEventId(sessionId),
+      cues: cuesFor(content, occurredAt),
+      source: 'tool',
+      status: 'active',
       importance: settings.workingMemory?.importance ?? 0.05,
     })
     store.upsert(rec)
@@ -269,8 +324,20 @@ export function apply(ctx) {
       (assistant ? ` | 助手：${assistant}` : '') +
       (tools.length ? ` | 工具：${tools.join(', ')}` : '')
     const existing = store.all().find((m) => m.content === content)
+    const eventId = eventIdFor(sessionId, buf.turn)
     const rec = engine.write(
-      { content, layer: 'episodic', kind: 'turn', sessionId, turn: buf.turn, occurredAt: buf.occurredAt },
+      {
+        content,
+        layer: 'episodic',
+        kind: 'turn',
+        sessionId,
+        turn: buf.turn,
+        occurredAt: buf.occurredAt,
+        eventId,
+        cues: cuesFor(content, buf.occurredAt),
+        source: 'user',
+        status: 'active',
+      },
       existing,
     )
     store.upsert(rec)
@@ -332,6 +399,13 @@ export function apply(ctx) {
         occurredAt: { type: 'json', description: '事件发生时间（可选）：ISO 字符串、YYYY-MM-DD 或 epoch 毫秒。' },
         sessionId: { type: 'string', description: '产生该记忆的会话 id（可选，用于区分不同会话，避免混淆）' },
         details: { type: 'array', items: { type: 'string' }, description: '细节列表（可选）：文件、命令、周边信息等；默认不返回，需要 detail 才带出' },
+        eventId: { type: 'string', description: '同一事件的 id（可选）：把一个事件的分布式记忆串起来' },
+        cues: { type: 'json', description: '线索（可选）：{ person, place, topic, time, emotion }' },
+        source: { type: 'string', description: '来源：user / assistant / tool / inference / self' },
+        confidence: { type: 'number', description: '置信度 0~1（推断建议 < 1）' },
+        status: { type: 'string', description: '状态：active / candidate / superseded' },
+        validFrom: { type: 'json', description: '有效开始时间（可选）' },
+        validTo: { type: 'json', description: '有效结束时间（可选）' },
       },
       output: {
         schema: {
@@ -353,13 +427,25 @@ export function apply(ctx) {
       },
       async execute(args) {
         const content = String(args.content)
-        const layer = ['episodic', 'semantic', 'core'].includes(args.layer) ? args.layer : 'episodic'
+        const layer = ['episodic', 'semantic', 'core', 'working', 'procedural', 'autobiographical'].includes(args.layer)
+          ? args.layer
+          : 'episodic'
         const dwellMs = typeof args.dwellMs === 'number' ? args.dwellMs : 0
         const occurredAt = parseTime(args.occurredAt)
         const sessionId = typeof args.sessionId === 'string' && args.sessionId ? args.sessionId : undefined
         const details = Array.isArray(args.details) ? args.details.filter((d) => typeof d === 'string') : []
+        const eventId = typeof args.eventId === 'string' && args.eventId ? args.eventId : undefined
+        const cues = args.cues && typeof args.cues === 'object' ? args.cues : undefined
+        const source = typeof args.source === 'string' ? args.source : 'user'
+        const confidence = typeof args.confidence === 'number' ? args.confidence : 1
+        const status = ['active', 'candidate', 'superseded'].includes(args.status) ? args.status : 'active'
+        const validFrom = parseTime(args.validFrom)
+        const validTo = parseTime(args.validTo)
         const existing = store.all().find((m) => m.content === content)
-        const record = engine.write({ content, layer, dwellMs, occurredAt, sessionId, details }, existing)
+        const record = engine.write(
+          { content, layer, dwellMs, occurredAt, sessionId, details, eventId, cues, source, confidence, status, validFrom, validTo },
+          existing,
+        )
         store.upsert(record)
         return { id: record.id, importance: record.importance, layer: record.layer, occurredAt: record.occurredAt }
       },
@@ -418,7 +504,7 @@ export function apply(ctx) {
         },
       },
       async execute(args) {
-        const limit = typeof args.limit === 'number' ? args.limit : 10
+        const limit = Math.min(Math.max(1, Number(args.limit) || 10), 50)
         const detail = args.detail === true
         const hits = engine.recall(store.all(), String(args.query), limit, Date.now(), detail)
         const now = Date.now()
@@ -488,7 +574,7 @@ export function apply(ctx) {
         },
       },
       async execute(args) {
-        const limit = typeof args.limit === 'number' ? args.limit : 50
+        const limit = Math.min(Math.max(1, Number(args.limit) || 50), 500)
         const detail = args.detail === true
         const rows = engine.timeline(
           store.all(),
@@ -506,6 +592,223 @@ export function apply(ctx) {
           sessionId: r.sessionId ?? '',
           turn: r.turn ?? 0,
         }))
+      },
+    }),
+  )
+
+  // ------------------------------------------------------------------
+  // 工具：重构 / 续接 / 预测（0.1.4）
+  // ------------------------------------------------------------------
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_reconstruct',
+      description:
+        '按当前线索把分布式记忆重新组合成一个版本（情景/语义/情绪/程序/自传体），返回组合文本、缺口与来源。' +
+        '这是「回忆」而不是「检索」：不落盘，每次按线索重新生成；被引用的记录会记一次再巩固。',
+      parameters: {
+        cue: { type: 'string', required: true, description: '当前线索 / 问题' },
+        detail: { type: 'boolean', description: '是否带出细节' },
+        asOf: { type: 'json', description: '查某个时间点（ISO / YYYY-MM-DD / epoch）' },
+        limit: { type: 'integer', description: '最多取材条数，默认 8' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            composed: { type: 'string' },
+            eventId: { type: 'string' },
+            gaps: { type: 'array', items: { type: 'string' } },
+            confidence: { type: 'number' },
+            sources: { type: 'array', items: { type: 'string' } },
+            regions: { type: 'object', additionalProperties: true },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: value.composed }],
+      },
+      async execute(args) {
+        const asOf = parseTime(args.asOf)
+        const result = engine.reconstruct(store.all(), String(args.cue), {
+          persona,
+          detail: args.detail === true,
+          asOf: asOf ?? null,
+          limit: Math.min(Math.max(1, Number(args.limit) || 8), 20),
+        })
+        // 再巩固：被重构过的记录留下痕迹，但不改原文
+        const now = Date.now()
+        for (const id of result.sources) {
+          const rec = store.get(id)
+          if (!rec) continue
+          store.upsert({
+            ...rec,
+            reconsolidationCount: (rec.reconsolidationCount ?? 0) + 1,
+            lastReconstructedAt: now,
+            lastAccessedAt: now,
+          })
+        }
+        return {
+          composed: result.composed,
+          eventId: result.eventId ?? '',
+          gaps: result.gaps,
+          confidence: result.confidence,
+          sources: result.sources,
+          regions: result.regions,
+        }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_resume',
+      description:
+        '阶段性续接：把某个会话的顺序记录重新拼成「目标 / 做到哪 / 最后一步 / 下一步」。不落盘，纯读时重构。',
+      parameters: { sessionId: { type: 'string', required: true, description: '会话 id' } },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            sessionId: { type: 'string' },
+            goal: { type: 'string' },
+            done: { type: 'array', items: { type: 'string' } },
+            last: { type: 'string' },
+            next: { type: 'string' },
+            confidence: { type: 'number' },
+            related: { type: 'object', additionalProperties: true },
+          },
+        },
+        render: (_args, value) => {
+          const lines = [
+            `目标：${value.goal || '（未记录）'}`,
+            `做到：${value.done.length ? value.done.join('；') : '（无）'}`,
+            `最后一步：${value.last || '（无）'}`,
+            `下一步：${value.next || '（由当前上下文推断）'}`,
+          ]
+          return [{ type: 'text', text: lines.join('\n') }]
+        },
+      },
+      async execute(args) {
+        return engine.resume(store.all(), String(args.sessionId), { persona })
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_predict',
+      description: '用已有经验预测当前情境：语义给概念、情景给类似案例、程序给后果、情绪给风险。',
+      parameters: { situation: { type: 'string', required: true, description: '当前情境' } },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            situation: { type: 'string' },
+            prediction: { type: 'string' },
+            gaps: { type: 'array', items: { type: 'string' } },
+            sources: { type: 'array', items: { type: 'string' } },
+            what: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            before: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            how: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            risk: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: value.prediction }],
+      },
+      async execute(args) {
+        return engine.predict(store.all(), String(args.situation), { persona })
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_feedback',
+      description: '记录一条人格反馈（如「说话要更有逻辑」），作为普通记忆存储，供人格参数调整参考。',
+      parameters: {
+        trait: {
+          type: 'string',
+          required: true,
+          description: '参数名：logic / warmth / caution / directness / verbosity / attention_* / retrieval_*',
+        },
+        direction: { type: 'string', description: 'increase 或 decrease' },
+        note: { type: 'string', description: '反馈原文' },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' } } },
+        render: (_args, value) => [{ type: 'text', text: `已记下反馈：${value.id}` }],
+      },
+      async execute(args) {
+        const trait = String(args.trait)
+        const direction = String(args.direction ?? 'increase').toLowerCase() === 'decrease' ? 'decrease' : 'increase'
+        const note = String(args.note ?? `${trait} 应${direction === 'decrease' ? '减弱' : '加强'}`)
+        const rec = engine.write({
+          content: `人格反馈：${note}`,
+          layer: 'autobiographical',
+          kind: 'feedback',
+          source: 'user',
+          status: 'active',
+          cues: { topic: [trait] },
+          details: [trait, direction],
+          importance: 0.8,
+        })
+        rec.trait = trait
+        rec.direction = direction
+        store.upsert(rec)
+        return { id: rec.id }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_persona',
+      description: '查看当前人格参数、最近的反馈记忆，以及由反馈推导出的参数增量建议（不自动修改）。',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            persona: { type: 'object', additionalProperties: true },
+            suggestions: { type: 'object', additionalProperties: true },
+            feedback: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          },
+        },
+        render: (_args, value) => {
+          const lines = Object.entries(value.persona || {}).map(([g, o]) => `${g}: ${JSON.stringify(o)}`)
+          const sug = Object.entries(value.suggestions || {}).map(([k, v]) => `${k} ${v > 0 ? '+' : ''}${v}`)
+          return [{ type: 'text', text: lines.join('\n') + (sug.length ? `\n建议：${sug.join('；')}` : '') }]
+        },
+      },
+      async execute() {
+        const feedback = store.all().filter((m) => m.kind === 'feedback').slice(-10)
+        return { persona, suggestions: suggestPersonaDeltas(feedback), feedback }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_persona_update',
+      description: '修改一个人格参数并持久化到 persona.json（例如 path=interpretation.logic, value=0.7）。',
+      parameters: {
+        path: { type: 'string', required: true, description: '参数路径，如 interpretation.logic / retrieval.episodic' },
+        value: { type: 'number', required: true, description: '新值（0~2）' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { ok: { type: 'boolean' }, persona: { type: 'object', additionalProperties: true } },
+        },
+        render: (_args, value) => [{ type: 'text', text: value.ok ? '人格参数已更新。' : '参数路径无效。' }],
+      },
+      async execute(args) {
+        const ok = setPersonaPath(persona, String(args.path), Number(args.value))
+        if (ok) store.writeAtomic(personaPath, JSON.stringify(persona, null, 2))
+        return { ok, persona }
       },
     }),
   )
@@ -548,6 +851,71 @@ export function apply(ctx) {
         const count = store.reload()
         const stats = memoryIndex?.stats() || { count: 0 }
         return { count, indexed: stats.count }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'memory_doctor',
+      description: '检查记忆库健康：记录数、各层数量、索引状态、回收站、损坏文件、候选记忆与反馈记忆数量。',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            records: { type: 'number' },
+            layers: { type: 'object', additionalProperties: true },
+            index: { type: 'object', additionalProperties: true },
+            trash: { type: 'number' },
+            corrupt: { type: 'number' },
+            candidates: { type: 'number' },
+            feedback: { type: 'number' },
+          },
+        },
+        render: (_args, value) => [
+          {
+            type: 'text',
+            text:
+              `记录 ${value.records} 条；索引 ${value.index.count} 条（${value.index.available ? '可用' : '不可用'}）；` +
+              `回收站 ${value.trash} 条；损坏文件 ${value.corrupt} 个；候选 ${value.candidates} 条；反馈 ${value.feedback} 条。`,
+          },
+        ],
+      },
+      async execute() {
+        const all = store.all()
+        const layers = {}
+        for (const r of all) layers[r.layer ?? 'unknown'] = (layers[r.layer ?? 'unknown'] ?? 0) + 1
+
+        let corrupt = 0
+        try {
+          const layersOnDisk = ['working', 'episodic', 'semantic', 'core', 'procedural', 'autobiographical']
+          for (const layer of layersOnDisk) {
+            const dir = join(memoryRoot, 'memories', layer)
+            if (!existsSync(dir)) continue
+            for (const f of readdirSync(dir)) {
+              if (!f.endsWith('.json')) continue
+              try {
+                JSON.parse(readFileSync(join(dir, f), 'utf8'))
+              } catch {
+                corrupt += 1
+              }
+            }
+          }
+        } catch {
+          /* 诊断本身不抛错 */
+        }
+
+        return {
+          records: all.length,
+          layers,
+          index: memoryIndex?.stats() ?? { available: false, count: 0 },
+          trash: store.listTrash().length,
+          corrupt,
+          candidates: all.filter((m) => m.status === 'candidate').length,
+          feedback: all.filter((m) => m.kind === 'feedback').length,
+        }
       },
     }),
   )
@@ -659,10 +1027,13 @@ export function apply(ctx) {
       handler() {
         const all = store.all().filter((m) => !m.deletedAt)
         if (!all.length) return { kind: 'success', text: '暂无记忆。' }
-        const lines = all.map(
+        const sorted = all.slice().sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0))
+        const shown = sorted.slice(0, 200)
+        const lines = shown.map(
           (m) => `- [${m.layer}${m.kind === 'turn' ? '/行为' : ''}${m.archived ? '/已归档' : ''}] [${formatDate(m.occurredAt ?? m.createdAt)}] ${m.content}`,
         )
-        return { kind: 'success', text: lines.join('\n') }
+        const suffix = all.length > shown.length ? `\n…（共 ${all.length} 条，仅显示权重最高的 ${shown.length} 条）` : ''
+        return { kind: 'success', text: lines.join('\n') + suffix }
       },
     })
     commands.register({

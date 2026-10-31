@@ -43,7 +43,7 @@ const check = (name, cond) => {
 mod.apply(ctx)
 
 // ---------- 注册 ----------
-check('apply() 注册 7 个工具', tools.length === 7)
+check('apply() 注册 14 个工具', tools.length === 14)
 check('注册 4 个斜杠命令', commands.length === 4)
 check('注册 agent/turn-stopping 监听', handlers.has('agent/turn-stopping'))
 check('注册 session/event 监听（自动自查）', handlers.has('session/event'))
@@ -52,8 +52,20 @@ const write = tools.find((t) => t.name === 'memory_write')
 const recall = tools.find((t) => t.name === 'memory_recall')
 const timeline = tools.find((t) => t.name === 'memory_timeline')
 const rescan = tools.find((t) => t.name === 'memory_rescan')
+const reconstruct = tools.find((t) => t.name === 'memory_reconstruct')
+const resume = tools.find((t) => t.name === 'memory_resume')
+const predict = tools.find((t) => t.name === 'memory_predict')
+const feedback = tools.find((t) => t.name === 'memory_feedback')
+const personaTool = tools.find((t) => t.name === 'memory_persona')
+const personaUpdate = tools.find((t) => t.name === 'memory_persona_update')
+const doctor = tools.find((t) => t.name === 'memory_doctor')
 const listCmd = commands.find((c) => c.name === 'memory-list')
 check('注册 memory_rescan 工具', !!rescan)
+check('注册 memory_doctor 工具', !!doctor)
+check(
+  '注册重构 / 续接 / 预测 / 人格工具',
+  !!reconstruct && !!resume && !!predict && !!feedback && !!personaTool && !!personaUpdate,
+)
 
 // ---------- 显式写入 / 召回 ----------
 const w = await write.execute({ content: '测试：这个项目用 Python 和 Vue 开发', layer: 'episodic', dwellMs: 600000 })
@@ -115,11 +127,37 @@ emit('agent/turn-stopping', { agent: { id: sid2 }, turn: 1, signal: new AbortCon
 const qHits = await recall.execute({ query: '数据库 用的是什么', limit: 10 })
 check('提问不会被自动写入事实记忆', !qHits.some((h) => h.content.includes('数据库用的是什么')))
 
+// ---------- 重构 / 续接 / 预测 / 人格 ----------
+const recon = await reconstruct.execute({ cue: 'Python Vue' })
+check('memory_reconstruct 返回组合文本', typeof recon.composed === 'string' && recon.composed.length > 0)
+
+const resumed = await resume.execute({ sessionId: sid })
+check('memory_resume 返回目标 / 最后 / 下一步', typeof resumed.goal === 'string' && typeof resumed.last === 'string')
+
+const predicted = await predict.execute({ situation: '继续改记忆插件' })
+check('memory_predict 返回预测文本', typeof predicted.prediction === 'string')
+
+const fb = await feedback.execute({ trait: 'logic', direction: 'increase', note: '说话更有逻辑' })
+check('memory_feedback 返回 id', !!fb.id)
+
+const personaView = await personaTool.execute({})
+check('memory_persona 返回参数与建议', !!personaView.persona && !!personaView.suggestions)
+
+const personaSet = await personaUpdate.execute({ path: 'interpretation.logic', value: 0.7 })
+check('memory_persona_update 返回 ok', personaSet.ok === true)
+
 // ---------- 重新扫描（memory_rescan） ----------
 const rescanned = await rescan.execute({})
 check(
   'memory_rescan 返回加载数与索引数',
   typeof rescanned.count === 'number' && rescanned.count >= 1 && typeof rescanned.indexed === 'number',
+)
+
+// ---------- 健康检查（memory_doctor） ----------
+const health = await doctor.execute({})
+check(
+  'memory_doctor 返回记录数 / 索引 / 损坏数',
+  typeof health.records === 'number' && typeof health.corrupt === 'number' && !!health.index,
 )
 
 // ---------- 落盘（目录式记忆库） ----------

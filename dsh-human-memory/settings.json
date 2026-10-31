@@ -35,6 +35,25 @@
     "threshold": 0.2
   },
 
+  // ---------- 人格参数网（注意 / 提取 / 解释 / 表达） ----------
+  "persona": {
+    // 注意选择：某类线索在回忆时的优先级（1 = 中性）
+    "attention": { "person": 1, "place": 1, "topic": 1, "time": 1, "emotion": 1 },
+    // 提取偏向：某个脑区的记忆更容易被想起
+    "retrieval": {
+      "working": 0.6,
+      "episodic": 1,
+      "semantic": 1,
+      "emotional": 1,
+      "procedural": 1,
+      "autobiographical": 1
+    },
+    // 解释偏向：交给模型的框架权重（0~1）
+    "interpretation": { "logic": 0.5, "warmth": 0.5, "caution": 0.5 },
+    // 表达抑制：最终呈现方式（0~1）
+    "expression": { "directness": 0.5, "verbosity": 0.5 }
+  },
+
   // ---------- 自动自查（每轮对话后自动提取值得记住的信息） ----------
   "autoCapture": {
     // 是否在每轮对话结束后自动自查并写入

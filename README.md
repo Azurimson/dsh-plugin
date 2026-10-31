@@ -6,7 +6,7 @@ DeepSeek Harness（DSH）插件合集。每个插件一个子目录，互相独�
 
 | 插件 | 简介 | 版本 |
 |------|------|------|
-| [dsh-human-memory](./dsh-human-memory) | 给 DSH 一套受认知科学启发的「人类式记忆」：遗忘曲线、间隔重复、巩固、主动复习、每轮自动自查、情绪识别、SQLite 索引，附本地设置区卡片 GUI。数据全部存本地目录式记忆库。 | [v0.1.3](https://github.com/Azurimson/dsh-plugin/releases/tag/v0.1.3) |
+| [dsh-human-memory](./dsh-human-memory) | 给 DSH 一套受认知科学启发的「人类式记忆」：遗忘曲线、间隔重复、巩固、主动复习、每轮自动自查、情绪识别、SQLite 索引、重构与人格参数，附本地设置区卡片 GUI。数据全部存本地目录式记忆库。文档提供中英双语。 | [v0.1.4](https://github.com/Azurimson/dsh-plugin/releases/tag/v0.1.4) |
 
 ## 安装某个插件
 

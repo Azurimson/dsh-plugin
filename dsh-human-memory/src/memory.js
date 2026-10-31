@@ -193,6 +193,7 @@ export class MemoryEngine {
     const w = this.retWeights
     return records
       .filter((r) => !r.archived && !r.deletedAt && r.kind !== 'turn')
+      .filter((r) => (r.status ?? 'active') !== 'superseded')
       .filter((r) => detail || r.fidelity !== 'detail')
       .map((r) => {
         const relevance = similarity(query, r.content)
@@ -207,6 +208,11 @@ export class MemoryEngine {
           emotionKind: r.emotionKind ?? 'neutral',
           emotionIntensity: r.emotionIntensity ?? 0,
           emotionCore: r.emotionCore ?? '',
+          eventId: r.eventId ?? null,
+          cues: this.cuesOf(r),
+          source: r.source ?? 'unknown',
+          confidence: r.confidence ?? 1,
+          status: r.status ?? 'active',
           score,
           strength: s,
           relevance,
@@ -217,6 +223,225 @@ export class MemoryEngine {
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
+  }
+
+  // ------------------------------------------------------------------
+  // 4.1 重构（分布式素材 + 多线索 + 先验补全 + 再巩固）
+  // ------------------------------------------------------------------
+
+  /** 记录所属的「脑区」。 */
+  regionOf(record) {
+    const layer = record.layer ?? 'episodic'
+    if (layer === 'core') return 'semantic'
+    if (
+      layer === 'semantic' ||
+      layer === 'episodic' ||
+      layer === 'working' ||
+      layer === 'procedural' ||
+      layer === 'autobiographical'
+    ) {
+      return layer
+    }
+    return 'episodic'
+  }
+
+  /** 读取记录的线索。 */
+  cuesOf(record) {
+    return record.cues && typeof record.cues === 'object' ? record.cues : {}
+  }
+
+  /** 查询文本与记录线索的重合度（受人格「注意」权重影响）。 */
+  cueOverlap(query, record, persona) {
+    const text = String(query ?? '')
+    const cues = this.cuesOf(record)
+    const attention = persona?.attention ?? {}
+    let score = 0
+    for (const key of ['person', 'place', 'topic', 'time', 'emotion']) {
+      const raw = cues[key]
+      const values = Array.isArray(raw) ? raw : raw ? [raw] : []
+      for (const v of values) {
+        if (v && text.includes(String(v))) score += 0.15 * (attention[key] ?? 1)
+      }
+    }
+    return score
+  }
+
+  /** 记录在 ts 时刻是否有效。 */
+  isActiveAt(record, ts) {
+    if ((record.status ?? 'active') === 'superseded') return false
+    const from = record.validFrom ?? record.occurredAt ?? record.createdAt ?? 0
+    const to = record.validTo ?? Infinity
+    return ts >= from && ts < to
+  }
+
+  /**
+   * 重构：按当前线索，把分布式记忆重新组合成一个版本（不落盘）。
+   * @param records 全部记录
+   * @param cue 当前线索（问题文本）
+   * @param opts { now, persona, detail, limit, asOf }
+   */
+  reconstruct(records, cue, opts = {}) {
+    const { now = Date.now(), persona = null, detail = false, limit = 8, asOf = null } = opts
+    const text = String(cue ?? '')
+    const ret = persona?.retrieval ?? {}
+
+    const scored = records
+      .filter((r) => !r.archived && !r.deletedAt)
+      .filter((r) => (r.status ?? 'active') !== 'superseded')
+      .filter((r) => (asOf == null ? true : this.isActiveAt(r, asOf)))
+      .filter((r) => detail || r.fidelity !== 'detail')
+      .map((r) => {
+        const relevance = similarity(text, r.content) + this.cueOverlap(text, r, persona)
+        const s = this.strength(r, now)
+        const layerWeight = ret[this.regionOf(r)] ?? 1
+        const score =
+          (this.retWeights.relevance * relevance + this.retWeights.strength * s + this.retWeights.importance * r.importance) *
+          layerWeight
+        return { record: r, score, relevance, strength: s, region: this.regionOf(r) }
+      })
+      .filter((h) => h.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+
+    const regions = { episodic: [], semantic: [], emotional: [], procedural: [], autobiographical: [], working: [] }
+    for (const hit of scored) {
+      ;(regions[hit.region] ?? regions.episodic).push(hit)
+      if ((hit.record.emotionIntensity ?? 0) >= (this.settings.emotion?.threshold ?? 0.2)) regions.emotional.push(hit)
+    }
+
+    const composed = this.compose(regions, { detail })
+    const gaps = ['episodic', 'semantic', 'emotional', 'procedural', 'autobiographical'].filter((k) => regions[k].length === 0)
+    const avgStrength = scored.length ? scored.reduce((a, h) => a + h.strength, 0) / scored.length : 0
+    const confidence = clamp01((scored.length / 4) * 0.5 + avgStrength * 0.5)
+
+    return {
+      cue: text,
+      eventId: this.pickEventId(scored),
+      composed,
+      gaps,
+      confidence: Math.round(confidence * 1000) / 1000,
+      regions: this.summarizeRegions(regions),
+      sources: scored.map((h) => h.record.id),
+    }
+  }
+
+  /** 选一个最常出现的 eventId 作为「这次想起的事件」。 */
+  pickEventId(scored) {
+    const counts = new Map()
+    for (const h of scored) {
+      const id = h.record.eventId
+      if (!id) continue
+      counts.set(id, (counts.get(id) ?? 0) + 1)
+    }
+    let best = null
+    let n = 0
+    for (const [id, c] of counts) {
+      if (c > n) {
+        best = id
+        n = c
+      }
+    }
+    return best
+  }
+
+  /** 把各区域的命中记录整理成可读结构。 */
+  summarizeRegions(regions) {
+    const out = {}
+    for (const [key, hits] of Object.entries(regions)) {
+      out[key] = hits.map((h) => ({
+        id: h.record.id,
+        content: h.record.content,
+        layer: h.record.layer,
+        fidelity: h.record.fidelity ?? 'gist',
+        details: Array.isArray(h.record.details) ? h.record.details : [],
+        emotionKind: h.record.emotionKind ?? 'neutral',
+        emotionIntensity: h.record.emotionIntensity ?? 0,
+        occurredAt: h.record.occurredAt ?? h.record.createdAt,
+        eventId: h.record.eventId ?? null,
+      }))
+    }
+    return out
+  }
+
+  /** 把多个分区的素材组合成一个「回忆版本」。 */
+  compose(regions, { detail = false } = {}) {
+    const pick = (k) => regions[k]?.[0]?.record
+    const ep = pick('episodic')
+    const emo = pick('emotional')
+    const sem = pick('semantic')
+    const proc = pick('procedural')
+    const auto = pick('autobiographical')
+
+    const lines = []
+    if (ep) lines.push(`我记得：${ep.content}`)
+    if (emo && emo.emotionCore) {
+      lines.push(`那时的感觉：${emo.emotionCore}（${emo.emotionKind ?? 'neutral'} ${Number(emo.emotionIntensity ?? 0).toFixed(2)}）`)
+    }
+    if (sem) lines.push(`这让我想到：${sem.content}`)
+    if (proc) lines.push(`类似地，我会：${proc.content}`)
+    if (auto) lines.push(`一路走来：${auto.content}`)
+    if (detail) {
+      const d = []
+      if (ep && Array.isArray(ep.details)) d.push(...ep.details)
+      if (sem && Array.isArray(sem.details)) d.push(...sem.details)
+      if (d.length) lines.push('细节：' + d.join('；'))
+    }
+    return lines.length ? lines.join('\n') : '没想起什么。'
+  }
+
+  /**
+   * 阶段性续接：把某个会话的顺序记录重新拼成「做到哪、卡在哪、下一步」。
+   * 不落盘，纯读时重构。
+   */
+  resume(records, sessionId, opts = {}) {
+    const { now = Date.now(), persona = null, limit = 10 } = opts
+    const turns = records
+      .filter((r) => r.sessionId === sessionId && r.kind === 'turn' && !r.deletedAt)
+      .sort((a, b) => (a.turn ?? 0) - (b.turn ?? 0))
+    if (!turns.length) {
+      return { sessionId, goal: '', done: [], last: '', next: '', related: null, confidence: 0 }
+    }
+    const recent = turns.slice(-limit)
+    const first = turns[0]
+    const last = recent[recent.length - 1]
+    const done = recent.slice(0, -1).map((r) => r.content)
+    const related = this.reconstruct(records, last.content, { now, persona, limit: 6 })
+    return {
+      sessionId,
+      goal: first.content,
+      done,
+      last: last.content,
+      next: this.inferNext(last),
+      related,
+      confidence: related.confidence,
+    }
+  }
+
+  /** 从最后一条行为里找「下一步」；找不到就留空，由模型推断。 */
+  inferNext(record) {
+    const texts = [record.content, ...(Array.isArray(record.details) ? record.details : [])]
+    for (const t of texts) {
+      const m = String(t ?? '').match(/(下一步|接下来|待办|todo)[:：]?\s*(.+)/i)
+      if (m) return m[2].trim()
+    }
+    return ''
+  }
+
+  /**
+   * 预测：用已有经验生成对当前情境的解释与行动预案（只读组合）。
+   */
+  predict(records, situation, opts = {}) {
+    const r = this.reconstruct(records, situation, { ...opts, limit: opts.limit ?? 8 })
+    return {
+      situation: String(situation ?? ''),
+      what: r.regions.semantic,
+      before: r.regions.episodic,
+      how: r.regions.procedural,
+      risk: r.regions.emotional,
+      prediction: r.composed,
+      gaps: r.gaps,
+      sources: r.sources,
+    }
   }
 
   /**
@@ -374,6 +599,16 @@ export class MemoryEngine {
     // importance 可显式覆盖（工作记忆刻意用很低的值）
     const importance = input.importance != null ? clamp01(input.importance) : this.computeImportance(factors)
 
+    // 0.1.4 存储表达：分布式连接 / 线索 / 证据 / 有效性
+    const eventId = input.eventId ?? null
+    const cues = input.cues && typeof input.cues === 'object' ? input.cues : {}
+    const source = input.source ?? 'user'
+    const confidence = input.confidence != null ? clamp01(input.confidence) : 1
+    const status = input.status ?? 'active'
+    const validFrom = input.validFrom != null ? (parseTime(input.validFrom) ?? occurredAt) : occurredAt
+    const validTo = input.validTo != null ? parseTime(input.validTo) : null
+    const lastConfirmedAt = input.lastConfirmedAt != null ? (parseTime(input.lastConfirmedAt) ?? now) : now
+
     if (existing) {
       const reinforced = this.reinforce(existing, now)
       const prevIntensity = existing.emotionIntensity ?? 0
@@ -391,6 +626,16 @@ export class MemoryEngine {
         emotionIntensity: nextIntensity,
         emotionKind: emo.intensity > prevIntensity ? emo.kind : (existing.emotionKind ?? 'neutral'),
         emotionCore: existing.emotionCore || emo.core,
+        eventId: existing.eventId ?? eventId,
+        cues: Object.keys(existing.cues || {}).length ? existing.cues : cues,
+        source: existing.source ?? source,
+        confidence: Math.max(existing.confidence ?? 0, confidence),
+        status: existing.status ?? status,
+        validFrom: existing.validFrom ?? validFrom,
+        validTo: existing.validTo ?? validTo,
+        lastConfirmedAt: now,
+        reconsolidationCount: existing.reconsolidationCount ?? 0,
+        lastReconstructedAt: existing.lastReconstructedAt ?? null,
       }
     }
 
@@ -405,6 +650,16 @@ export class MemoryEngine {
       emotionKind: emo.intensity >= emotionThreshold ? emo.kind : 'neutral',
       emotionIntensity: emo.intensity,
       emotionCore: emo.core,
+      eventId,
+      cues,
+      source,
+      confidence,
+      status,
+      validFrom,
+      validTo,
+      lastConfirmedAt,
+      reconsolidationCount: 0,
+      lastReconstructedAt: null,
       createdAt: now,
       occurredAt,
       lastAccessedAt: now,

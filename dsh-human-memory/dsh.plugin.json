@@ -1,7 +1,7 @@
 {
   "id": "dsh-human-memory",
   "name": "DSH Human Memory",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "给 DSH 赋予人类式记忆：遗忘曲线、间隔重复、巩固、行为时间线与本地 GUI。",
   "license": "MIT",
   "tags": ["memory", "memory-context", "forgetting-curve", "spaced-repetition"],

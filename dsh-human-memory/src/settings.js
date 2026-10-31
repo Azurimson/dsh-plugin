@@ -23,6 +23,19 @@ export const DEFAULT_SETTINGS = {
   emotion: {
     threshold: 0.2,
   },
+  persona: {
+    attention: { person: 1, place: 1, topic: 1, time: 1, emotion: 1 },
+    retrieval: {
+      working: 0.6,
+      episodic: 1,
+      semantic: 1,
+      emotional: 1,
+      procedural: 1,
+      autobiographical: 1,
+    },
+    interpretation: { logic: 0.5, warmth: 0.5, caution: 0.5 },
+    expression: { directness: 0.5, verbosity: 0.5 },
+  },
   autoCapture: {
     enabled: true,
     minChars: 8,
