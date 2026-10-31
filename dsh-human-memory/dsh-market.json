@@ -97,6 +97,16 @@
             "commit": "47d907c57cb16e0a259b0b228be2cb0598110cdd",
             "path": "dsh-human-memory"
           }
+        },
+        {
+          "version": "0.1.4",
+          "publishTimestamp": 1793435955,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/Azurimson/dsh-plugin",
+            "commit": "78982b0b9a10297f0a884d90ca2c32dcd575889e",
+            "path": "dsh-human-memory"
+          }
         }
       ]
     }
